@@ -367,6 +367,7 @@ def write_html_report(results, html_dir, repo_url, upstream_url, repo_index):
       <input class="search-box" type="search" id="cmp-search"
              placeholder="Search packages..." oninput="cmpTable.search(this.value)">
       <span class="row-count" id="cmp-count"></span>
+      <span class="row-count">from <a href="https://github.com/BlankOn/blankon-live-build/tree/main/config/package-lists" target="_blank">https://github.com/BlankOn/blankon-live-build/tree/main/config/package-lists</a></span>
     </div>
     <div class="pagination" id="cmp-pages" style="margin-bottom:0.6rem"></div>
     <table>
