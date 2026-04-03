@@ -355,7 +355,7 @@ def write_html_report(results, html_dir, repo_url, upstream_url, repo_index):
     <div class="pagination" id="pkg-pages" style="margin-bottom:0.6rem"></div>
     <table>
       <thead><tr><th>Package</th><th>Version</th></tr></thead>
-      <tbody id="pkg-tbody"></tbody>
+      <tbody id="pkg-tbody"><tr><td colspan="2" style="color:#999;font-style:italic">Loading...</td></tr></tbody>
     </table>
     <div class="pagination" id="pkg-pages-bottom" style="margin-top:0.6rem"></div>
   </div>
@@ -375,7 +375,7 @@ def write_html_report(results, html_dir, repo_url, upstream_url, repo_index):
           <th>Package</th><th>Our version</th><th>Upstream version (Sid)</th><th>Status</th>
         </tr>
       </thead>
-      <tbody id="cmp-tbody"></tbody>
+      <tbody id="cmp-tbody"><tr><td colspan="4" style="color:#999;font-style:italic">Loading...</td></tr></tbody>
     </table>
     <div class="pagination" id="cmp-pages-bottom" style="margin-top:0.6rem"></div>
   </div>
