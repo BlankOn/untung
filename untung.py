@@ -244,7 +244,17 @@ def compare_versions(packages, repo_index, upstream_index):
 
 # ── html report ───────────────────────────────────────────────────────────────
 
-def write_html_report(results, html_dir, repo_url, upstream_url, repo_index):
+def _repo_label(url):
+    """Extract a short display label from a repo URL (hostname)."""
+    from urllib.parse import urlparse
+    host = urlparse(url).hostname or url
+    return host
+
+
+def write_html_report(repo_data_list, html_dir, upstream_url):
+    """
+    repo_data_list: list of {"url": str, "index": dict, "results": list}
+    """
     import html as _html
     import json as _json
 
@@ -253,32 +263,108 @@ def write_html_report(results, html_dir, repo_url, upstream_url, repo_index):
     def e(s):
         return _html.escape(str(s)) if s is not None else ""
 
-    count_behind = sum(1 for r in results if r["status"] == "behind")
-    summary = (
-        f"{count_behind} package(s) behind upstream."
-        if count_behind
-        else "All packages are up to date with upstream."
-    )
-    summary_color = "#c0392b" if count_behind else "#27ae60"
-
-    # Embed data as JSON; JS handles rendering and pagination
-    pkg_data = _json.dumps(
-        [{"n": k, "v": info["version"], "u": info["url"]} for k, info in sorted(repo_index.items())]
-    )
-    cmp_data = _json.dumps([
-        {
-            "n": r["package"],
-            "rv": r["repo_version"] or "",
-            "uv": r["upstream_version"] or "",
-            "s": r["status"],
-        }
-        for r in (
+    def make_cmp_rows(results):
+        ordered = (
             [r for r in results if r["status"] == "behind"] +
             [r for r in results if r["status"] == "not_in_repo"] +
             [r for r in results if r["status"] == "not_in_upstream"] +
             [r for r in results if r["status"] == "up_to_date"]
         )
-    ])
+        return [
+            {
+                "n": r["package"],
+                "rv": r["repo_version"] or "",
+                "uv": r["upstream_version"] or "",
+                "s": r["status"],
+            }
+            for r in ordered
+        ]
+
+    # Build per-repo JS data blobs
+    repos_js_entries = []
+    for rd in repo_data_list:
+        pkg_data = _json.dumps(
+            [{"n": k, "v": info["version"], "u": info["url"]}
+             for k, info in sorted(rd["index"].items())]
+        )
+        cmp_data = _json.dumps(make_cmp_rows(rd["results"]))
+        label = e(_repo_label(rd["url"]))
+        url = e(rd["url"])
+        count_behind = sum(1 for r in rd["results"] if r["status"] == "behind")
+        summary = (
+            f"{count_behind} package(s) behind upstream."
+            if count_behind
+            else "All packages are up to date with upstream."
+        )
+        summary_color = "#c0392b" if count_behind else "#27ae60"
+        repos_js_entries.append({
+            "label": label,
+            "url": url,
+            "pkg_data": pkg_data,
+            "cmp_data": cmp_data,
+            "summary": e(summary),
+            "summary_color": summary_color,
+        })
+
+    # Generate repo meta line
+    repo_links = " &nbsp;|&nbsp; ".join(
+        f'<a href="{r["url"]}" target="_blank">{r["label"]}</a>'
+        for r in repos_js_entries
+    )
+
+    # Generate top-level repo tab buttons
+    repo_tab_btns = "\n    ".join(
+        f'<button class="tab-btn repo-tab-btn{" active" if i == 0 else ""}" '
+        f'onclick="switchRepoTab({i}, this)">{r["label"]}</button>'
+        for i, r in enumerate(repos_js_entries)
+    )
+
+    # Generate repo panels (each with sub-tabs)
+    repo_panels_html = ""
+    for i, r in enumerate(repos_js_entries):
+        active_panel = "active" if i == 0 else ""
+        repo_panels_html += f"""
+  <div id="repo-{i}" class="repo-panel {active_panel}">
+    <div class="tabs sub-tabs" style="margin-top:1rem">
+      <button class="tab-btn sub-tab-btn active" onclick="switchSubTab('r{i}-pkg-list', this, {i})">Package List</button>
+      <button class="tab-btn sub-tab-btn" onclick="switchSubTab('r{i}-upstream-cmp', this, {i})">Upstream Comparison</button>
+    </div>
+
+    <div id="r{i}-pkg-list" class="sub-panel active">
+      <div class="toolbar">
+        <input class="search-box" type="search" id="r{i}-pkg-search"
+               placeholder="Search packages..." oninput="TABLES[{i}].pkg.search(this.value)">
+        <span class="row-count" id="r{i}-pkg-count"></span>
+      </div>
+      <div class="pagination" id="r{i}-pkg-pages" style="margin-bottom:0.6rem"></div>
+      <table>
+        <thead><tr><th>Package</th><th>Version</th></tr></thead>
+        <tbody id="r{i}-pkg-tbody"><tr><td colspan="2" style="color:#999;font-style:italic">Loading...</td></tr></tbody>
+      </table>
+      <div class="pagination" id="r{i}-pkg-pages-bottom" style="margin-top:0.6rem"></div>
+    </div>
+
+    <div id="r{i}-upstream-cmp" class="sub-panel">
+      <div class="summary" style="color:{r['summary_color']};font-weight:bold;margin:0.8rem 0">{r['summary']}</div>
+      <div class="toolbar">
+        <input class="search-box" type="search" id="r{i}-cmp-search"
+               placeholder="Search packages..." oninput="TABLES[{i}].cmp.search(this.value)">
+        <span class="row-count" id="r{i}-cmp-count"></span>
+        <span class="row-count">from <a href="https://github.com/BlankOn/blankon-live-build/tree/main/config/package-lists" target="_blank">blankon-live-build</a></span>
+      </div>
+      <div class="pagination" id="r{i}-cmp-pages" style="margin-bottom:0.6rem"></div>
+      <table>
+        <thead><tr><th>Package</th><th>Repo version</th><th>Upstream version (Sid)</th><th>Status</th></tr></thead>
+        <tbody id="r{i}-cmp-tbody"><tr><td colspan="4" style="color:#999;font-style:italic">Loading...</td></tr></tbody>
+      </table>
+      <div class="pagination" id="r{i}-cmp-pages-bottom" style="margin-top:0.6rem"></div>
+    </div>
+  </div>
+"""
+
+    # Generate JS data arrays
+    all_pkg_data = "[" + ",\n".join(r["pkg_data"] for r in repos_js_entries) + "]"
+    all_cmp_data = "[" + ",\n".join(r["cmp_data"] for r in repos_js_entries) + "]"
 
     page = f"""<!DOCTYPE html>
 <html lang="en">
@@ -293,8 +379,7 @@ def write_html_report(results, html_dir, repo_url, upstream_url, repo_index):
     body {{ font-family: system-ui, sans-serif; margin: 2rem; color: #222; }}
     h1 {{ font-size: 1.4rem; margin-bottom: 0.25rem; }}
     .meta {{ color: #666; font-size: 0.9rem; margin-bottom: 1rem; }}
-    .summary {{ font-weight: bold; margin-bottom: 1rem; color: {summary_color}; }}
-    .tabs {{ display: flex; gap: 0; margin-bottom: 1.5rem; border-bottom: 2px solid #ddd; }}
+    .tabs {{ display: flex; gap: 0; border-bottom: 2px solid #ddd; }}
     .tab-btn {{
       padding: 0.5rem 1.2rem; cursor: pointer; border: 1px solid transparent;
       border-bottom: none; background: none; font-size: 0.95rem; color: #555;
@@ -305,8 +390,10 @@ def write_html_report(results, html_dir, repo_url, upstream_url, repo_index):
       border-color: #ddd; border-bottom-color: #fff; background: #fff;
       color: #222; font-weight: bold;
     }}
-    .tab-panel {{ display: none; }}
-    .tab-panel.active {{ display: block; }}
+    .repo-panel {{ display: none; }}
+    .repo-panel.active {{ display: block; }}
+    .sub-panel {{ display: none; margin-top: 1rem; }}
+    .sub-panel.active {{ display: block; }}
     .toolbar {{ display: flex; align-items: center; gap: 1rem; margin-bottom: 0.6rem; flex-wrap: wrap; }}
     .search-box {{
       padding: 0.4rem 0.7rem; font-size: 0.9rem; border: 1px solid #ccc;
@@ -334,57 +421,22 @@ def write_html_report(results, html_dir, repo_url, upstream_url, repo_index):
 <body>
   <h1>BlankOn Linux Package Report</h1>
   <div class="meta">
-    Repository: <a href="{e(repo_url)}" target="_blank">{e(repo_url)}</a>
+    Repositories: {repo_links}
     &nbsp;|&nbsp;
     Upstream: <a href="{e(upstream_url)}" target="_blank">{e(upstream_url)}</a>
     &nbsp;|&nbsp; Generated: {e(generated_at)}
   </div>
 
-  <div class="tabs">
-    <button class="tab-btn active" onclick="switchTab('pkg-list', this)">Package List</button>
-    <button class="tab-btn" onclick="switchTab('upstream-cmp', this)">Upstream Comparison</button>
+  <div class="tabs repo-tabs">
+    {repo_tab_btns}
   </div>
-
-  <!-- Tab 1: Package List -->
-  <div id="pkg-list" class="tab-panel active">
-    <div class="toolbar">
-      <input class="search-box" type="search" id="pkg-search"
-             placeholder="Search packages..." oninput="pkgTable.search(this.value)">
-      <span class="row-count" id="pkg-count"></span>
-    </div>
-    <div class="pagination" id="pkg-pages" style="margin-bottom:0.6rem"></div>
-    <table>
-      <thead><tr><th>Package</th><th>Version</th></tr></thead>
-      <tbody id="pkg-tbody"><tr><td colspan="2" style="color:#999;font-style:italic">Loading...</td></tr></tbody>
-    </table>
-    <div class="pagination" id="pkg-pages-bottom" style="margin-top:0.6rem"></div>
-  </div>
-
-  <!-- Tab 2: Upstream Comparison -->
-  <div id="upstream-cmp" class="tab-panel">
-    <div class="summary" id="cmp-summary">{e(summary)}</div>
-    <div class="toolbar">
-      <input class="search-box" type="search" id="cmp-search"
-             placeholder="Search packages..." oninput="cmpTable.search(this.value)">
-      <span class="row-count" id="cmp-count"></span>
-      <span class="row-count">from <a href="https://github.com/BlankOn/blankon-live-build/tree/main/config/package-lists" target="_blank">https://github.com/BlankOn/blankon-live-build/tree/main/config/package-lists</a></span>
-    </div>
-    <div class="pagination" id="cmp-pages" style="margin-bottom:0.6rem"></div>
-    <table>
-      <thead>
-        <tr>
-          <th>Package</th><th>Our version</th><th>Upstream version (Sid)</th><th>Status</th>
-        </tr>
-      </thead>
-      <tbody id="cmp-tbody"><tr><td colspan="4" style="color:#999;font-style:italic">Loading...</td></tr></tbody>
-    </table>
-    <div class="pagination" id="cmp-pages-bottom" style="margin-top:0.6rem"></div>
-  </div>
+  {repo_panels_html}
 
   <script>
-    const PKG_DATA = {pkg_data};
-    const CMP_DATA = {cmp_data};
+    const ALL_PKG_DATA = {all_pkg_data};
+    const ALL_CMP_DATA = {all_cmp_data};
     const PAGE_SIZE = 100;
+    const TABLES = [];
 
     function escHtml(s) {{
       return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -461,12 +513,6 @@ def write_html_report(results, html_dir, repo_url, upstream_url, repo_index):
       return obj;
     }}
 
-    const pkgTable = makePaged(
-      PKG_DATA,
-      'pkg-tbody', 'pkg-pages', 'pkg-pages-bottom', 'pkg-count',
-      r => '<tr><td>' + (r.u ? '<a href="' + escHtml(r.u.substring(0, r.u.lastIndexOf('/') + 1)) + '" target="_blank">' + escHtml(r.n) + '</a>' : escHtml(r.n)) + '</td><td>' + escHtml(r.v) + '</td></tr>'
-    );
-
     const STATUS_CLASS = {{
       behind: 'ver-below', up_to_date: 'ver-above', not_in_repo: 'ver-missing', not_in_upstream: ''
     }};
@@ -474,25 +520,43 @@ def write_html_report(results, html_dir, repo_url, upstream_url, repo_index):
       behind: 'Behind', up_to_date: 'Up to date', not_in_repo: 'Not in repo', not_in_upstream: 'Not available in upstream'
     }};
 
-    const cmpTable = makePaged(
-      CMP_DATA,
-      'cmp-tbody', 'cmp-pages', 'cmp-pages-bottom', 'cmp-count',
-      r => {{
-        const cls = STATUS_CLASS[r.s] || '';
-        const lbl = STATUS_LABEL[r.s] || r.s;
-        return '<tr>' +
-          '<td>' + escHtml(r.n) + '</td>' +
-          '<td class="' + cls + '">' + (escHtml(r.rv) || '—') + '</td>' +
-          '<td>' + (escHtml(r.uv) || '—') + '</td>' +
-          '<td class="' + cls + '">' + lbl + '</td>' +
-          '</tr>';
-      }}
-    );
+    ALL_PKG_DATA.forEach((pkgData, i) => {{
+      const pkg = makePaged(
+        pkgData,
+        'r' + i + '-pkg-tbody', 'r' + i + '-pkg-pages', 'r' + i + '-pkg-pages-bottom', 'r' + i + '-pkg-count',
+        r => '<tr><td>' + (r.u
+          ? '<a href="' + escHtml(r.u.substring(0, r.u.lastIndexOf('/') + 1)) + '" target="_blank">' + escHtml(r.n) + '</a>'
+          : escHtml(r.n)) + '</td><td>' + escHtml(r.v) + '</td></tr>'
+      );
+      const cmp = makePaged(
+        ALL_CMP_DATA[i],
+        'r' + i + '-cmp-tbody', 'r' + i + '-cmp-pages', 'r' + i + '-cmp-pages-bottom', 'r' + i + '-cmp-count',
+        r => {{
+          const cls = STATUS_CLASS[r.s] || '';
+          const lbl = STATUS_LABEL[r.s] || r.s;
+          return '<tr>' +
+            '<td>' + escHtml(r.n) + '</td>' +
+            '<td class="' + cls + '">' + (escHtml(r.rv) || '—') + '</td>' +
+            '<td>' + (escHtml(r.uv) || '—') + '</td>' +
+            '<td class="' + cls + '">' + lbl + '</td>' +
+            '</tr>';
+        }}
+      );
+      TABLES.push({{ pkg, cmp }});
+    }});
 
-    function switchTab(id, btn) {{
-      document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
-      document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
-      document.getElementById(id).classList.add('active');
+    function switchRepoTab(idx, btn) {{
+      document.querySelectorAll('.repo-panel').forEach(p => p.classList.remove('active'));
+      document.querySelectorAll('.repo-tab-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById('repo-' + idx).classList.add('active');
+      btn.classList.add('active');
+    }}
+
+    function switchSubTab(panelId, btn, repoIdx) {{
+      const repoPanel = document.getElementById('repo-' + repoIdx);
+      repoPanel.querySelectorAll('.sub-panel').forEach(p => p.classList.remove('active'));
+      repoPanel.querySelectorAll('.sub-tab-btn').forEach(b => b.classList.remove('active'));
+      document.getElementById(panelId).classList.add('active');
       btn.classList.add('active');
     }}
   </script>
@@ -513,51 +577,51 @@ def write_html_report(results, html_dir, repo_url, upstream_url, repo_index):
 # ── entry point ───────────────────────────────────────────────────────────────
 
 def main():
-    repo_url = None
+    repo_urls = []
     upstream_repo = None
     html_dir = None
 
     for arg in sys.argv[1:]:
         if arg.startswith("--repo=") or arg.startswith("--repository="):
-            repo_url = arg.split("=", 1)[1]
+            repo_urls.append(arg.split("=", 1)[1])
         elif arg.startswith("--upstream-repo="):
             upstream_repo = arg.split("=", 1)[1]
         elif arg.startswith("--html="):
             html_dir = arg.split("=", 1)[1]
 
-    if not repo_url:
-        print("Error: --repo=<url> is required", file=sys.stderr)
+    if not repo_urls:
+        print("Error: at least one --repo=<url> is required", file=sys.stderr)
         sys.exit(1)
     if not upstream_repo:
         print("Error: --upstream-repo=<url> is required", file=sys.stderr)
         sys.exit(1)
 
     packages = fetch_package_list()
-
-    repo_index = build_package_index(repo_url)
     upstream_index = build_upstream_index(upstream_repo)
 
-    print("Comparing versions ...", file=sys.stderr)
-    results = compare_versions(packages, repo_index, upstream_index)
+    repo_data_list = []
+    for repo_url in repo_urls:
+        repo_index = build_package_index(repo_url)
 
-    behind = [r for r in results if r["status"] == "behind"]
-    not_in_repo = [r for r in results if r["status"] == "not_in_repo"]
+        print(f"Comparing versions for {repo_url} ...", file=sys.stderr)
+        results = compare_versions(packages, repo_index, upstream_index)
 
-    if not behind and not not_in_repo:
-        print("All packages are up to date with upstream.", file=sys.stderr)
-    else:
-        print(f"\n{len(behind)} package(s) behind upstream:\n", file=sys.stderr)
-        for r in behind:
-            print(f"  {r['package']}")
-            print(f"    Our version      : {r['repo_version']}")
-            print(f"    Upstream version : {r['upstream_version']}")
-        if not_in_repo:
-            print(f"\n{len(not_in_repo)} package(s) not found in repo:", file=sys.stderr)
-            for r in not_in_repo:
-                print(f"  {r['package']} (upstream: {r['upstream_version']})", file=sys.stderr)
+        behind = [r for r in results if r["status"] == "behind"]
+        not_in_repo = [r for r in results if r["status"] == "not_in_repo"]
+
+        if not behind and not not_in_repo:
+            print(f"  All packages are up to date with upstream.", file=sys.stderr)
+        else:
+            print(f"  {len(behind)} package(s) behind upstream:", file=sys.stderr)
+            for r in behind:
+                print(f"    {r['package']}: {r['repo_version']} < {r['upstream_version']}", file=sys.stderr)
+            if not_in_repo:
+                print(f"  {len(not_in_repo)} package(s) not found in repo.", file=sys.stderr)
+
+        repo_data_list.append({"url": repo_url, "index": repo_index, "results": results})
 
     if html_dir:
-        write_html_report(results, html_dir, repo_url, upstream_repo, repo_index)
+        write_html_report(repo_data_list, html_dir, upstream_repo)
 
 
 if __name__ == "__main__":
