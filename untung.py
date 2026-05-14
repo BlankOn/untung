@@ -251,7 +251,7 @@ def _repo_label(url):
     return host
 
 
-def write_html_report(repo_data_list, html_dir, upstream_url):
+def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=None):
     """
     repo_data_list: list of {"url": str, "index": dict, "results": list}
     """
@@ -306,17 +306,29 @@ def write_html_report(repo_data_list, html_dir, upstream_url):
             "summary_color": summary_color,
         })
 
+    # Build upstream JS data
+    upstream_pkg_data = "[]"
+    if upstream_index:
+        upstream_pkg_data = _json.dumps(
+            [{"n": k, "v": info["version"], "u": info["url"]}
+             for k, info in sorted(upstream_index.items())]
+        )
+
     # Generate repo meta line
     repo_links = " &nbsp;|&nbsp; ".join(
         f'<a href="{r["url"]}" target="_blank">{r["label"]}</a>'
         for r in repos_js_entries
     )
 
-    # Generate top-level repo tab buttons
+    # Generate top-level repo tab buttons (repos + upstream)
     repo_tab_btns = "\n    ".join(
         f'<button class="tab-btn repo-tab-btn{" active" if i == 0 else ""}" '
         f'onclick="switchRepoTab({i}, this)">{r["label"]}</button>'
         for i, r in enumerate(repos_js_entries)
+    )
+    repo_tab_btns += (
+        '\n    <button class="tab-btn repo-tab-btn" '
+        'onclick="switchRepoTab(\'upstream\', this)">Upstream</button>'
     )
 
     # Generate repo panels (each with sub-tabs)
@@ -358,6 +370,30 @@ def write_html_report(repo_data_list, html_dir, upstream_url):
         <tbody id="r{i}-cmp-tbody"><tr><td colspan="4" style="color:#999;font-style:italic">Loading...</td></tr></tbody>
       </table>
       <div class="pagination" id="r{i}-cmp-pages-bottom" style="margin-top:0.6rem"></div>
+    </div>
+  </div>
+"""
+
+    # Generate upstream panel HTML
+    upstream_label = e(_repo_label(upstream_url))
+    repo_panels_html += f"""
+  <div id="repo-upstream" class="repo-panel">
+    <div class="tabs sub-tabs" style="margin-top:1rem">
+      <button class="tab-btn sub-tab-btn active" onclick="switchSubTab('upstream-pkg-list', this, 'upstream')">Package List</button>
+    </div>
+
+    <div id="upstream-pkg-list" class="sub-panel active">
+      <div class="toolbar">
+        <input class="search-box" type="search" id="upstream-pkg-search"
+               placeholder="Search packages..." oninput="UPSTREAM_TABLE.search(this.value)">
+        <span class="row-count" id="upstream-pkg-count"></span>
+      </div>
+      <div class="pagination" id="upstream-pkg-pages" style="margin-bottom:0.6rem"></div>
+      <table>
+        <thead><tr><th>Package</th><th>Version</th></tr></thead>
+        <tbody id="upstream-pkg-tbody"><tr><td colspan="2" style="color:#999;font-style:italic">Loading...</td></tr></tbody>
+      </table>
+      <div class="pagination" id="upstream-pkg-pages-bottom" style="margin-top:0.6rem"></div>
     </div>
   </div>
 """
@@ -435,8 +471,10 @@ def write_html_report(repo_data_list, html_dir, upstream_url):
   <script>
     const ALL_PKG_DATA = {all_pkg_data};
     const ALL_CMP_DATA = {all_cmp_data};
+    const UPSTREAM_PKG_DATA = {upstream_pkg_data};
     const PAGE_SIZE = 100;
     const TABLES = [];
+    let UPSTREAM_TABLE;
 
     function escHtml(s) {{
       return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -545,6 +583,14 @@ def write_html_report(repo_data_list, html_dir, upstream_url):
       TABLES.push({{ pkg, cmp }});
     }});
 
+    UPSTREAM_TABLE = makePaged(
+      UPSTREAM_PKG_DATA,
+      'upstream-pkg-tbody', 'upstream-pkg-pages', 'upstream-pkg-pages-bottom', 'upstream-pkg-count',
+      r => '<tr><td>' + (r.u
+        ? '<a href="' + escHtml(r.u.substring(0, r.u.lastIndexOf('/') + 1)) + '" target="_blank">' + escHtml(r.n) + '</a>'
+        : escHtml(r.n)) + '</td><td>' + escHtml(r.v) + '</td></tr>'
+    );
+
     function switchRepoTab(idx, btn) {{
       document.querySelectorAll('.repo-panel').forEach(p => p.classList.remove('active'));
       document.querySelectorAll('.repo-tab-btn').forEach(b => b.classList.remove('active'));
@@ -553,7 +599,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url):
     }}
 
     function switchSubTab(panelId, btn, repoIdx) {{
-      const repoPanel = document.getElementById('repo-' + repoIdx);
+      const repoPanel = document.getElementById('repo-' + String(repoIdx));
       repoPanel.querySelectorAll('.sub-panel').forEach(p => p.classList.remove('active'));
       repoPanel.querySelectorAll('.sub-tab-btn').forEach(b => b.classList.remove('active'));
       document.getElementById(panelId).classList.add('active');
@@ -621,7 +667,7 @@ def main():
         repo_data_list.append({"url": repo_url, "index": repo_index, "results": results})
 
     if html_dir:
-        write_html_report(repo_data_list, html_dir, upstream_repo)
+        write_html_report(repo_data_list, html_dir, upstream_repo, upstream_index)
 
 
 if __name__ == "__main__":
