@@ -145,10 +145,14 @@ def build_package_index(repo_url, arch="amd64"):
     binary package -> {version, url} map.
     """
     print(f"Discovering dists at {repo_url} ...", file=sys.stderr)
-    dists = discover_dists(repo_url)
+    try:
+        dists = discover_dists(repo_url)
+    except Exception as exc:
+        print(f"  Warning: failed to reach {repo_url}: {exc}", file=sys.stderr)
+        return {}
     if not dists:
-        print("Error: no dists found.", file=sys.stderr)
-        sys.exit(1)
+        print(f"  Warning: no dists found at {repo_url}, skipping.", file=sys.stderr)
+        return {}
     print(f"  Found dists: {', '.join(dists)}", file=sys.stderr)
 
     index = {}
@@ -169,7 +173,11 @@ def build_package_index(repo_url, arch="amd64"):
 def build_upstream_index(repo_url, arch="amd64"):
     """Fetch binary package versions from the 'sid' dist of an upstream repo."""
     print(f"Fetching sid index from upstream {repo_url} ...", file=sys.stderr)
-    _, components = fetch_release(repo_url, "sid")
+    try:
+        _, components = fetch_release(repo_url, "sid")
+    except Exception as exc:
+        print(f"  Warning: failed to reach upstream {repo_url}: {exc}", file=sys.stderr)
+        return {}
     if not components:
         print("  Warning: sid release not found or has no components.", file=sys.stderr)
         return {}
