@@ -595,7 +595,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
 <body>
   <header class="nav" id="site-nav">
     <div class="nav-inner">
-      <a href="https://blankonlinux.id/id" aria-label="BlankOn">
+      <a href="https://blankonlinux.id/en" aria-label="BlankOn">
         <img class="nav-logo" src="https://blankonlinux.id/logo-black.png"
              alt="BlankOn" width="796" height="189">
       </a>
@@ -607,8 +607,8 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         </svg>
       </button>
       <nav class="nav-links">
-        <a href="https://blankonlinux.id/id/download">Download</a>
-        <a href="https://blankonlinux.id/id/wiki/">Wiki</a>
+        <a href="https://blankonlinux.id/en/download">Download</a>
+        <a href="https://blankonlinux.id/en/wiki/">Wiki</a>
         <div class="nav-dropdown" id="dev-menu">
           <button class="nav-dd-btn" type="button" aria-haspopup="menu"
                   aria-expanded="false" onclick="toggleDevMenu(this)">
@@ -617,7 +617,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
                  stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
           </button>
           <ul class="nav-dd-menu">
-            <li><a href="https://blankonlinux.id/id/team">Team</a></li>
+            <li><a href="https://blankonlinux.id/en/team">Team</a></li>
             <li><a href="https://irgsh.blankonlinux.id/">IRGSH</a></li>
             <li><a href="https://packages.blankonlinux.id/">Packages</a></li>
             <li><a href="https://security.blankonlinux.id/">Security</a></li>
