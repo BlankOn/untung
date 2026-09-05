@@ -434,9 +434,19 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
   <meta http-equiv="Expires" content="0">
   <title>BlankOn Linux Package Report</title>
   <style>
+    /* Colours mirror the fumadocs tokens blankonlinux.id renders with
+       (fumadocs-ui/css/colors/index.css): the bar is fd-background at 80%,
+       a very light grey, over the white page. */
     :root {{
-      --fg: #18181b; --muted: #6b7280; --border: #e4e4e7; --bg: #ffffff;
-      --accent-bg: #f4f4f5; --brand: #ff0000; --link: #1a73e8;
+      --fg: hsl(0, 0%, 3.9%);
+      --muted: hsl(0, 0%, 45.1%);
+      --border: hsla(0, 0%, 80%, 0.5);
+      --bg: #ffffff;
+      --bar-bg: hsl(0, 0%, 96%);
+      --accent-bg: hsla(0, 0%, 82%, 0.5);
+      --accent-fg: hsl(0, 0%, 9%);
+      --brand: #ff0000;
+      --link: #1a73e8;
     }}
     * {{ box-sizing: border-box; }}
     html {{ -webkit-text-size-adjust: 100%; }}
@@ -450,8 +460,8 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
     /* ── top bar (mirrors blankonlinux.id) ── */
     .nav {{
       position: sticky; top: 0; z-index: 50;
-      background: rgba(255, 255, 255, 0.85);
-      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+      background: hsla(0, 0%, 96%, 0.8);
+      backdrop-filter: blur(16px); -webkit-backdrop-filter: blur(16px);
       border-bottom: 1px solid var(--border);
     }}
     .nav::after {{
@@ -472,12 +482,15 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       color: var(--muted); text-decoration: none;
       background: none; border: 0; cursor: pointer; transition: color 0.15s;
     }}
-    .nav-links a:hover, .nav-dd-btn:hover {{ color: var(--fg); }}
+    .nav-links a:hover, .nav-dd-btn:hover {{ color: var(--accent-fg); }}
     .nav-ext {{ width: 14px; height: 14px; flex-shrink: 0; opacity: 0.7; }}
     .nav-chevron {{ width: 12px; height: 12px; transition: transform 0.15s; }}
     .nav-dropdown.open .nav-chevron {{ transform: rotate(180deg); }}
     .nav-dropdown {{ position: relative; }}
     .nav-dd-menu {{ list-style: none; margin: 0; padding: 0.25rem 0; min-width: 170px; }}
+    /* Override the inline-flex from .nav-links a, so the hover highlight
+       spans the whole row instead of hugging the label. */
+    .nav-dd-menu a {{ display: flex; width: 100%; }}
     .nav-dropdown:not(.open) .nav-dd-menu {{ display: none; }}
     .nav-burger {{
       display: none; margin-left: auto; padding: 0.5rem; color: var(--fg);
@@ -486,9 +499,15 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
 
     @media (min-width: 861px) {{
       .nav-dd-menu {{
-        position: absolute; right: 0; top: 100%; margin-top: 0.25rem; z-index: 60;
-        background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+        position: absolute; right: 0; top: 100%; margin-top: 0.5rem; z-index: 60;
+        background: var(--bar-bg); border: 1px solid var(--border); border-radius: 6px;
         box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+      }}
+      /* Invisible bridge over the gap: without it the pointer leaves the
+         dropdown on its way from the button to the panel and it snaps shut. */
+      .nav-dd-menu::before {{
+        content: ''; position: absolute; left: 0; right: 0;
+        top: -0.5rem; height: 0.5rem;
       }}
       .nav-dd-menu a {{ padding: 0.5rem 1rem; }}
       .nav-dd-menu a:hover {{ background: var(--accent-bg); }}
@@ -498,7 +517,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       .nav-links {{
         display: none; position: absolute; left: 0; right: 0; top: 100%;
         flex-direction: column; align-items: stretch; gap: 0;
-        padding: 0.5rem 1rem 1rem; background: var(--bg);
+        padding: 0.5rem 1rem 1rem; background: var(--bar-bg);
         border-bottom: 1px solid var(--border);
         max-height: calc(100vh - 56px); overflow-y: auto;
       }}
@@ -777,6 +796,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
     }}
 
     function toggleDevMenu(btn) {{
+      clearTimeout(devCloseTimer);
       setDevMenu(canHover() ? true : !DEV_MENU.classList.contains('open'));
     }}
 
@@ -788,8 +808,17 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
     }}
 
     // Pointer devices open the Development menu on hover; touch devices tap it.
-    DEV_MENU.addEventListener('mouseenter', () => {{ if (canHover()) setDevMenu(true); }});
-    DEV_MENU.addEventListener('mouseleave', () => {{ if (canHover()) setDevMenu(false); }});
+    // Closing is delayed so a slow diagonal move onto the panel does not lose it.
+    let devCloseTimer;
+    DEV_MENU.addEventListener('mouseenter', () => {{
+      clearTimeout(devCloseTimer);
+      if (canHover()) setDevMenu(true);
+    }});
+    DEV_MENU.addEventListener('mouseleave', () => {{
+      if (!canHover()) return;
+      clearTimeout(devCloseTimer);
+      devCloseTimer = setTimeout(() => setDevMenu(false), 100);
+    }});
 
     document.addEventListener('pointerdown', (event) => {{
       if (!DEV_MENU.contains(event.target)) setDevMenu(false);
