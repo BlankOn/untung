@@ -324,7 +324,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
 
     # Generate repo meta line
     repo_links = " &nbsp;|&nbsp; ".join(
-        f'<a href="{r["url"]}" target="_blank">{r["label"]}</a>'
+        f'<a href="{r["url"]}">{r["label"]}</a>'
         for r in repos_js_entries
     )
 
@@ -357,10 +357,12 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         <span class="row-count" id="r{i}-pkg-count"></span>
       </div>
       <div class="pagination" id="r{i}-pkg-pages" style="margin-bottom:0.6rem"></div>
-      <table>
-        <thead><tr><th>Package</th><th>Version</th></tr></thead>
-        <tbody id="r{i}-pkg-tbody"><tr><td colspan="2" style="color:#999;font-style:italic">Loading...</td></tr></tbody>
-      </table>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Package</th><th>Version</th></tr></thead>
+          <tbody id="r{i}-pkg-tbody"><tr><td colspan="2" style="color:#999;font-style:italic">Loading...</td></tr></tbody>
+        </table>
+      </div>
       <div class="pagination" id="r{i}-pkg-pages-bottom" style="margin-top:0.6rem"></div>
     </div>
 
@@ -370,13 +372,15 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         <input class="search-box" type="search" id="r{i}-cmp-search"
                placeholder="Search packages..." oninput="TABLES[{i}].cmp.search(this.value)">
         <span class="row-count" id="r{i}-cmp-count"></span>
-        <span class="row-count">from <a href="https://github.com/BlankOn/blankon-live-build/tree/main/config/package-lists" target="_blank">blankon-live-build</a></span>
+        <span class="row-count">from <a href="https://github.com/BlankOn/blankon-live-build/tree/main/config/package-lists">blankon-live-build</a></span>
       </div>
       <div class="pagination" id="r{i}-cmp-pages" style="margin-bottom:0.6rem"></div>
-      <table>
-        <thead><tr><th>Package</th><th>Repo version</th><th>Upstream version (Sid)</th><th>Status</th></tr></thead>
-        <tbody id="r{i}-cmp-tbody"><tr><td colspan="4" style="color:#999;font-style:italic">Loading...</td></tr></tbody>
-      </table>
+      <div class="table-wrap">
+        <table class="cmp-table">
+          <thead><tr><th>Package</th><th>Repo version</th><th>Upstream version (Sid)</th><th>Status</th></tr></thead>
+          <tbody id="r{i}-cmp-tbody"><tr><td colspan="4" style="color:#999;font-style:italic">Loading...</td></tr></tbody>
+        </table>
+      </div>
       <div class="pagination" id="r{i}-cmp-pages-bottom" style="margin-top:0.6rem"></div>
     </div>
   </div>
@@ -397,14 +401,24 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         <span class="row-count" id="upstream-pkg-count"></span>
       </div>
       <div class="pagination" id="upstream-pkg-pages" style="margin-bottom:0.6rem"></div>
-      <table>
-        <thead><tr><th>Package</th><th>Version</th></tr></thead>
-        <tbody id="upstream-pkg-tbody"><tr><td colspan="2" style="color:#999;font-style:italic">Loading...</td></tr></tbody>
-      </table>
+      <div class="table-wrap">
+        <table>
+          <thead><tr><th>Package</th><th>Version</th></tr></thead>
+          <tbody id="upstream-pkg-tbody"><tr><td colspan="2" style="color:#999;font-style:italic">Loading...</td></tr></tbody>
+        </table>
+      </div>
       <div class="pagination" id="upstream-pkg-pages-bottom" style="margin-top:0.6rem"></div>
     </div>
   </div>
 """
+
+    # Small external-link glyph, matching the one on blankonlinux.id.
+    EXT_ICON = (
+        '<svg class="nav-ext" viewBox="0 0 24 24" fill="none" stroke="currentColor" '
+        'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">'
+        '<path d="M15 3h6v6"/><path d="M10 14 21 3"/>'
+        '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>'
+    )
 
     # Generate JS data arrays
     all_pkg_data = "[" + ",\n".join(r["pkg_data"] for r in repos_js_entries) + "]"
@@ -420,14 +434,94 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
   <meta http-equiv="Expires" content="0">
   <title>BlankOn Linux Package Report</title>
   <style>
-    body {{ font-family: system-ui, sans-serif; margin: 2rem; color: #222; }}
-    h1 {{ font-size: 1.4rem; margin-bottom: 0.25rem; }}
-    .meta {{ color: #666; font-size: 0.9rem; margin-bottom: 1rem; }}
-    .tabs {{ display: flex; gap: 0; border-bottom: 2px solid #ddd; }}
+    :root {{
+      --fg: #18181b; --muted: #6b7280; --border: #e4e4e7; --bg: #ffffff;
+      --accent-bg: #f4f4f5; --brand: #ff0000; --link: #1a73e8;
+    }}
+    * {{ box-sizing: border-box; }}
+    html {{ -webkit-text-size-adjust: 100%; }}
+    body {{
+      margin: 0; color: var(--fg); background: var(--bg);
+      -webkit-font-smoothing: antialiased; -moz-osx-font-smoothing: grayscale;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen,
+        Ubuntu, Cantarell, 'Fira Sans', 'Droid Sans', 'Helvetica Neue', sans-serif;
+    }}
+
+    /* ── top bar (mirrors blankonlinux.id) ── */
+    .nav {{
+      position: sticky; top: 0; z-index: 50;
+      background: rgba(255, 255, 255, 0.85);
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+      border-bottom: 1px solid var(--border);
+    }}
+    .nav::after {{
+      content: ''; position: absolute; left: 0; right: 0; bottom: -2px;
+      height: 2px; pointer-events: none;
+      background: linear-gradient(to right, transparent 0%, transparent 30%,
+        var(--brand) 50%, transparent 70%, transparent 100%);
+    }}
+    .nav-inner {{
+      max-width: 1400px; margin: 0 auto; min-height: 56px; padding: 0 1rem;
+      display: flex; align-items: center; gap: 1rem;
+    }}
+    .nav-logo {{ height: 24px; width: auto; max-width: 100%; display: block; object-fit: contain; }}
+    .nav-links {{ display: flex; align-items: center; gap: 0.5rem; padding: 0 1.5rem; }}
+    .nav-links a, .nav-dd-btn {{
+      display: inline-flex; align-items: center; gap: 0.35rem; padding: 0.5rem;
+      font-family: inherit; font-size: 0.875rem; line-height: 1.2;
+      color: var(--muted); text-decoration: none;
+      background: none; border: 0; cursor: pointer; transition: color 0.15s;
+    }}
+    .nav-links a:hover, .nav-dd-btn:hover {{ color: var(--fg); }}
+    .nav-ext {{ width: 14px; height: 14px; flex-shrink: 0; opacity: 0.7; }}
+    .nav-chevron {{ width: 12px; height: 12px; transition: transform 0.15s; }}
+    .nav-dropdown.open .nav-chevron {{ transform: rotate(180deg); }}
+    .nav-dropdown {{ position: relative; }}
+    .nav-dd-menu {{ list-style: none; margin: 0; padding: 0.25rem 0; min-width: 170px; }}
+    .nav-dropdown:not(.open) .nav-dd-menu {{ display: none; }}
+    .nav-burger {{
+      display: none; margin-left: auto; padding: 0.5rem; color: var(--fg);
+      background: none; border: 0; cursor: pointer;
+    }}
+
+    @media (min-width: 861px) {{
+      .nav-dd-menu {{
+        position: absolute; right: 0; top: 100%; margin-top: 0.25rem; z-index: 60;
+        background: var(--bg); border: 1px solid var(--border); border-radius: 6px;
+        box-shadow: 0 4px 12px rgba(0, 0, 0, 0.08);
+      }}
+      .nav-dd-menu a {{ padding: 0.5rem 1rem; }}
+      .nav-dd-menu a:hover {{ background: var(--accent-bg); }}
+    }}
+    @media (max-width: 860px) {{
+      .nav-burger {{ display: inline-flex; }}
+      .nav-links {{
+        display: none; position: absolute; left: 0; right: 0; top: 100%;
+        flex-direction: column; align-items: stretch; gap: 0;
+        padding: 0.5rem 1rem 1rem; background: var(--bg);
+        border-bottom: 1px solid var(--border);
+        max-height: calc(100vh - 56px); overflow-y: auto;
+      }}
+      .nav.open .nav-links {{ display: flex; }}
+      .nav-links a, .nav-dd-btn {{ padding: 0.65rem 0.25rem; font-size: 0.95rem; }}
+      .nav-dd-btn {{ width: 100%; justify-content: space-between; }}
+      .nav-dd-menu a {{ padding: 0.6rem 0.25rem 0.6rem 1rem; }}
+    }}
+
+    /* ── page ── */
+    .container {{ max-width: 1400px; margin: 0 auto; padding: 1.5rem 1rem 2rem; }}
+    h1 {{ font-size: 1.4rem; margin: 0 0 0.25rem; }}
+    .meta {{ color: #666; font-size: 0.9rem; margin-bottom: 1rem; line-height: 1.7; overflow-wrap: anywhere; }}
+    .tabs {{
+      display: flex; gap: 0; border-bottom: 2px solid #ddd;
+      overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+    }}
+    .tabs::-webkit-scrollbar {{ display: none; }}
     .tab-btn {{
       padding: 0.5rem 1.2rem; cursor: pointer; border: 1px solid transparent;
-      border-bottom: none; background: none; font-size: 0.95rem; color: #555;
-      border-radius: 4px 4px 0 0; margin-bottom: -2px;
+      border-bottom: none; background: none; font-family: inherit; font-size: 0.95rem;
+      color: #555; border-radius: 4px 4px 0 0; margin-bottom: -2px;
+      white-space: nowrap; flex: 0 0 auto;
     }}
     .tab-btn:hover {{ background: #f4f4f4; }}
     .tab-btn.active {{
@@ -440,34 +534,92 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
     .sub-panel.active {{ display: block; }}
     .toolbar {{ display: flex; align-items: center; gap: 1rem; margin-bottom: 0.6rem; flex-wrap: wrap; }}
     .search-box {{
-      padding: 0.4rem 0.7rem; font-size: 0.9rem; border: 1px solid #ccc;
-      border-radius: 4px; width: 280px; box-sizing: border-box;
+      padding: 0.4rem 0.7rem; font-family: inherit; font-size: 16px; border: 1px solid #ccc;
+      border-radius: 4px; width: 280px; max-width: 100%; box-sizing: border-box;
     }}
     .row-count {{ color: #666; font-size: 0.85rem; }}
     .pagination {{ display: flex; align-items: center; gap: 0.3rem; flex-wrap: wrap; }}
     .pg-btn {{
       padding: 0.25rem 0.6rem; border: 1px solid #ccc; border-radius: 3px;
-      background: #fff; cursor: pointer; font-size: 0.82rem; color: #333;
+      background: #fff; cursor: pointer; font-family: inherit; font-size: 0.82rem; color: #333;
+      min-width: 2rem;
     }}
     .pg-btn:hover {{ background: #f4f4f4; }}
-    .pg-btn.active {{ background: #1a73e8; color: #fff; border-color: #1a73e8; font-weight: bold; }}
+    .pg-btn.active {{ background: var(--link); color: #fff; border-color: var(--link); font-weight: bold; }}
     .pg-btn:disabled {{ opacity: 0.4; cursor: default; }}
+    .table-wrap {{ overflow-x: auto; -webkit-overflow-scrolling: touch; }}
     table {{ border-collapse: collapse; width: 100%; font-size: 0.88rem; }}
     th, td {{ border: 1px solid #ddd; padding: 0.45rem 0.65rem; vertical-align: top; }}
     th {{ background: #f4f4f4; text-align: left; white-space: nowrap; }}
+    td {{ overflow-wrap: anywhere; }}
     tr:hover > td {{ background: #fafafa; }}
     .ver-above {{ color: #27ae60; font-weight: bold; }}
     .ver-below {{ color: #c0392b; font-weight: bold; }}
     .ver-missing {{ color: #e67e22; font-weight: bold; }}
-    a {{ color: #1a73e8; }}
+    a {{ color: var(--link); }}
+    footer {{ margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee;
+      color: #999; font-size: 0.82rem; overflow-wrap: anywhere; }}
+
+    @media (max-width: 640px) {{
+      .container {{ padding: 1rem 0.75rem 2rem; }}
+      .tab-btn {{ padding: 0.5rem 0.85rem; font-size: 0.9rem; }}
+      .search-box {{ flex: 1 1 100%; width: 100%; }}
+      table {{ font-size: 0.82rem; }}
+      th, td {{ padding: 0.4rem 0.5rem; }}
+      /* Let wide tables scroll inside .table-wrap instead of squeezing columns. */
+      .table-wrap table {{ min-width: 340px; }}
+      .table-wrap table.cmp-table {{ min-width: 560px; }}
+      .cmp-table td:last-child {{ white-space: nowrap; }}
+    }}
   </style>
 </head>
 <body>
+  <header class="nav" id="site-nav">
+    <div class="nav-inner">
+      <a href="https://blankonlinux.id/id" aria-label="BlankOn">
+        <img class="nav-logo" src="https://blankonlinux.id/logo-black.png"
+             alt="BlankOn" width="796" height="189">
+      </a>
+      <button class="nav-burger" type="button" aria-label="Menu"
+              aria-expanded="false" onclick="toggleNav(this)">
+        <svg width="22" height="22" viewBox="0 0 24 24" fill="none"
+             stroke="currentColor" stroke-width="2" stroke-linecap="round">
+          <path d="M4 7h16M4 12h16M4 17h16"/>
+        </svg>
+      </button>
+      <nav class="nav-links">
+        <a href="https://blankonlinux.id/id/download">Download</a>
+        <a href="https://blankonlinux.id/id/wiki/">Wiki</a>
+        <div class="nav-dropdown" id="dev-menu">
+          <button class="nav-dd-btn" type="button" aria-haspopup="menu"
+                  aria-expanded="false" onclick="toggleDevMenu(this)">
+            Development
+            <svg class="nav-chevron" viewBox="0 0 24 24" fill="none"
+                 stroke="currentColor" stroke-width="2"><path d="M6 9l6 6 6-6"/></svg>
+          </button>
+          <ul class="nav-dd-menu">
+            <li><a href="https://blankonlinux.id/id/team">Team</a></li>
+            <li><a href="https://irgsh.blankonlinux.id/">IRGSH</a></li>
+            <li><a href="https://packages.blankonlinux.id/">Packages</a></li>
+            <li><a href="https://security.blankonlinux.id/">Security</a></li>
+            <li><a href="https://jahitan.blankonlinux.id/" target="_blank" rel="noopener noreferrer">Jahitan{EXT_ICON}</a></li>
+            <li><a href="https://arsip.blankonlinux.id/" target="_blank" rel="noopener noreferrer">Arsip{EXT_ICON}</a></li>
+            <li><a href="https://arsip-dev.blankonlinux.id/" target="_blank" rel="noopener noreferrer">Arsip Dev{EXT_ICON}</a></li>
+            <li><a href="https://github.com/blankon" target="_blank" rel="noopener noreferrer">Github{EXT_ICON}</a></li>
+          </ul>
+        </div>
+        <a href="https://blankon.id/en/sponsorship" target="_blank" rel="noopener noreferrer">Sponsorship{EXT_ICON}</a>
+        <a href="https://blankon.id/en/donate" target="_blank" rel="noopener noreferrer">Donate{EXT_ICON}</a>
+      </nav>
+    </div>
+  </header>
+
+  <div class="container">
   <h1>BlankOn Linux Package Report</h1>
   <div class="meta">
     Repositories: {repo_links}
     &nbsp;|&nbsp;
-    Upstream: <a href="{e(upstream_url)}" target="_blank">{e(upstream_url)}</a>
+    Upstream: <a href="{e(upstream_url)}">{e(upstream_url)}</a>
     &nbsp;|&nbsp; Generated: {e(generated_at)}
   </div>
 
@@ -571,7 +723,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         pkgData,
         'r' + i + '-pkg-tbody', 'r' + i + '-pkg-pages', 'r' + i + '-pkg-pages-bottom', 'r' + i + '-pkg-count',
         r => '<tr><td>' + (r.u
-          ? '<a href="' + escHtml(r.u.substring(0, r.u.lastIndexOf('/') + 1)) + '" target="_blank">' + escHtml(r.n) + '</a>'
+          ? '<a href="' + escHtml(r.u.substring(0, r.u.lastIndexOf('/') + 1)) + '">' + escHtml(r.n) + '</a>'
           : escHtml(r.n)) + '</td><td>' + escHtml(r.v) + '</td></tr>'
       );
       const cmp = makePaged(
@@ -595,7 +747,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       UPSTREAM_PKG_DATA,
       'upstream-pkg-tbody', 'upstream-pkg-pages', 'upstream-pkg-pages-bottom', 'upstream-pkg-count',
       r => '<tr><td>' + (r.u
-        ? '<a href="' + escHtml(r.u.substring(0, r.u.lastIndexOf('/') + 1)) + '" target="_blank">' + escHtml(r.n) + '</a>'
+        ? '<a href="' + escHtml(r.u.substring(0, r.u.lastIndexOf('/') + 1)) + '">' + escHtml(r.n) + '</a>'
         : escHtml(r.n)) + '</td><td>' + escHtml(r.v) + '</td></tr>'
     );
 
@@ -613,10 +765,50 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       document.getElementById(panelId).classList.add('active');
       btn.classList.add('active');
     }}
+
+    // ── top bar ──
+    const NAV = document.getElementById('site-nav');
+    const DEV_MENU = document.getElementById('dev-menu');
+    const canHover = () => window.matchMedia('(hover: hover)').matches;
+
+    function setDevMenu(open) {{
+      DEV_MENU.classList.toggle('open', open);
+      DEV_MENU.querySelector('.nav-dd-btn').setAttribute('aria-expanded', String(open));
+    }}
+
+    function toggleDevMenu(btn) {{
+      setDevMenu(canHover() ? true : !DEV_MENU.classList.contains('open'));
+    }}
+
+    function toggleNav(btn) {{
+      const open = !NAV.classList.contains('open');
+      NAV.classList.toggle('open', open);
+      btn.setAttribute('aria-expanded', String(open));
+      if (!open) setDevMenu(false);
+    }}
+
+    // Pointer devices open the Development menu on hover; touch devices tap it.
+    DEV_MENU.addEventListener('mouseenter', () => {{ if (canHover()) setDevMenu(true); }});
+    DEV_MENU.addEventListener('mouseleave', () => {{ if (canHover()) setDevMenu(false); }});
+
+    document.addEventListener('pointerdown', (event) => {{
+      if (!DEV_MENU.contains(event.target)) setDevMenu(false);
+      if (!NAV.contains(event.target)) {{
+        NAV.classList.remove('open');
+        NAV.querySelector('.nav-burger').setAttribute('aria-expanded', 'false');
+      }}
+    }});
+    document.addEventListener('keydown', (event) => {{
+      if (event.key !== 'Escape') return;
+      setDevMenu(false);
+      NAV.classList.remove('open');
+      NAV.querySelector('.nav-burger').setAttribute('aria-expanded', 'false');
+    }});
   </script>
-  <footer style="margin-top:2rem; padding-top:1rem; border-top:1px solid #eee; color:#999; font-size:0.82rem;">
-    Source code: <a href="https://github.com/blankon/untung" target="_blank">https://github.com/blankon/untung</a>
+  <footer>
+    Source code: <a href="https://github.com/blankon/untung">https://github.com/blankon/untung</a>
   </footer>
+  </div>
 </body>
 </html>
 """
