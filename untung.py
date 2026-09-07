@@ -12,6 +12,7 @@ import urllib.request
 
 LIVE_BUILD_REPO = "https://github.com/BlankOn/blankon-live-build.git"
 LIVE_BUILD_PKG_DIR = "config/package-lists"
+UPSTREAM_DEFAULT_DIST = "sid"
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -139,28 +140,37 @@ def fetch_packages(repo_url, dist, component, arch="amd64"):
     return packages
 
 
-def build_package_index(repo_url, arch="amd64"):
+def build_package_index(repo_url, arch="amd64", dist=None):
     """
-    Walk all dists and components in the repo and return a unified
-    binary package -> {version, url} map.
+    Return a unified binary package -> {version, url} map for the repo.
+
+    With a dist (suite) given, only that dist is indexed. Without one, every
+    dist advertised under {repo}/dists/ is walked and merged.
     """
-    print(f"Discovering dists at {repo_url} ...", file=sys.stderr)
-    try:
-        dists = discover_dists(repo_url)
-    except Exception as exc:
-        print(f"  Warning: failed to reach {repo_url}: {exc}", file=sys.stderr)
-        return {}
-    if not dists:
-        print(f"  Warning: no dists found at {repo_url}, skipping.", file=sys.stderr)
-        return {}
-    print(f"  Found dists: {', '.join(dists)}", file=sys.stderr)
+    if dist:
+        dists = [dist]
+        print(f"Indexing {repo_url} dist {dist} ...", file=sys.stderr)
+    else:
+        print(f"Discovering dists at {repo_url} ...", file=sys.stderr)
+        try:
+            dists = discover_dists(repo_url)
+        except Exception as exc:
+            print(f"  Warning: failed to reach {repo_url}: {exc}", file=sys.stderr)
+            return {}
+        if not dists:
+            print(f"  Warning: no dists found at {repo_url}, skipping.", file=sys.stderr)
+            return {}
+        print(f"  Found dists: {', '.join(dists)}", file=sys.stderr)
 
     index = {}
-    for dist in dists:
-        _, components = fetch_release(repo_url, dist)
+    for d in dists:
+        _, components = fetch_release(repo_url, d)
+        if not components:
+            print(f"  Warning: {d} release not found or has no components.", file=sys.stderr)
+            continue
         for component in components:
-            print(f"  Fetching {dist}/{component}/binary-{arch}/Packages.gz ...", file=sys.stderr)
-            pkgs = fetch_packages(repo_url, dist, component, arch)
+            print(f"  Fetching {d}/{component}/binary-{arch}/Packages.gz ...", file=sys.stderr)
+            pkgs = fetch_packages(repo_url, d, component, arch)
             for pkg, info in pkgs.items():
                 existing = index.get(pkg)
                 if existing is None or version_lt(existing["version"], info["version"]):
@@ -170,28 +180,28 @@ def build_package_index(repo_url, arch="amd64"):
     return index
 
 
-def build_upstream_index(repo_url, arch="amd64"):
-    """Fetch binary package versions from the 'sid' dist of an upstream repo."""
-    print(f"Fetching sid index from upstream {repo_url} ...", file=sys.stderr)
+def build_upstream_index(repo_url, arch="amd64", dist=UPSTREAM_DEFAULT_DIST):
+    """Fetch binary package versions from one dist (suite) of an upstream repo."""
+    print(f"Fetching {dist} index from upstream {repo_url} ...", file=sys.stderr)
     try:
-        _, components = fetch_release(repo_url, "sid")
+        _, components = fetch_release(repo_url, dist)
     except Exception as exc:
         print(f"  Warning: failed to reach upstream {repo_url}: {exc}", file=sys.stderr)
         return {}
     if not components:
-        print("  Warning: sid release not found or has no components.", file=sys.stderr)
+        print(f"  Warning: {dist} release not found or has no components.", file=sys.stderr)
         return {}
 
     index = {}
     for component in components:
-        print(f"  Fetching sid/{component}/binary-{arch}/Packages.gz ...", file=sys.stderr)
-        pkgs = fetch_packages(repo_url, "sid", component, arch)
+        print(f"  Fetching {dist}/{component}/binary-{arch}/Packages.gz ...", file=sys.stderr)
+        pkgs = fetch_packages(repo_url, dist, component, arch)
         for pkg, info in pkgs.items():
             existing = index.get(pkg)
             if existing is None or version_lt(existing["version"], info["version"]):
                 index[pkg] = info
 
-    print(f"  Indexed {len(index)} binary packages from sid.", file=sys.stderr)
+    print(f"  Indexed {len(index)} binary packages from {dist}.", file=sys.stderr)
     return index
 
 
@@ -250,16 +260,56 @@ def compare_versions(packages, repo_index, upstream_index):
     return results
 
 
+def compare_repo_diff(repo_index, upstream_index):
+    """
+    Compare every binary package in the repo against upstream and return only
+    the packages whose version differs (or that upstream does not carry).
+
+    Unlike compare_versions(), this is not scoped to the blankon-live-build
+    package list -- it walks the whole repo index. Packages that upstream has
+    but the repo does not are left out: the repo, not upstream, is the subject.
+    """
+    results = []
+    for pkg in sorted(repo_index):
+        repo_ver = repo_index[pkg]["version"]
+        upstream_info = upstream_index.get(pkg)
+
+        if upstream_info is None:
+            results.append({
+                "package": pkg,
+                "repo_version": repo_ver,
+                "repo_url": repo_index[pkg]["url"],
+                "upstream_version": None,
+                "status": "not_in_upstream",
+            })
+            continue
+
+        upstream_ver = upstream_info["version"]
+        if repo_ver == upstream_ver:
+            continue
+
+        results.append({
+            "package": pkg,
+            "repo_version": repo_ver,
+            "repo_url": repo_index[pkg]["url"],
+            "upstream_version": upstream_ver,
+            "status": "behind" if version_lt(repo_ver, upstream_ver) else "ahead",
+        })
+
+    return results
+
+
 # ── html report ───────────────────────────────────────────────────────────────
 
-def _repo_label(url):
-    """Extract a short display label from a repo URL (hostname)."""
+def _repo_label(url, dist=None):
+    """Display label for a repo: "hostname / dist" (or just the hostname)."""
     from urllib.parse import urlparse
     host = urlparse(url).hostname or url
-    return host
+    return f"{host} / {dist}" if dist else host
 
 
-def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=None):
+def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=None,
+                      upstream_dist=UPSTREAM_DEFAULT_DIST):
     """
     repo_data_list: list of {"url": str, "index": dict, "results": list}
     """
@@ -288,6 +338,22 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
             for r in ordered
         ]
 
+    def make_diff_rows(results):
+        ordered = (
+            [r for r in results if r["status"] == "behind"] +
+            [r for r in results if r["status"] == "ahead"] +
+            [r for r in results if r["status"] == "not_in_upstream"]
+        )
+        return [
+            {
+                "n": r["package"],
+                "rv": r["repo_version"] or "",
+                "uv": r["upstream_version"] or "",
+                "s": r["status"],
+            }
+            for r in ordered
+        ]
+
     # Build per-repo JS data blobs
     repos_js_entries = []
     for rd in repo_data_list:
@@ -296,7 +362,9 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
              for k, info in sorted(rd["index"].items())]
         )
         cmp_data = _json.dumps(make_cmp_rows(rd["results"]))
-        label = e(_repo_label(rd["url"]))
+        diff_rows = make_diff_rows(rd.get("diff", []))
+        diff_data = _json.dumps(diff_rows)
+        label = e(_repo_label(rd["url"], rd.get("dist")))
         url = e(rd["url"])
         count_behind = sum(1 for r in rd["results"] if r["status"] == "behind")
         summary = (
@@ -305,13 +373,32 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
             else "All packages are up to date with upstream."
         )
         summary_color = "#c0392b" if count_behind else "#27ae60"
+
+        diff_counts = {
+            k: sum(1 for r in diff_rows if r["s"] == k)
+            for k in ("behind", "ahead", "not_in_upstream")
+        }
+        if diff_rows:
+            diff_summary = (
+                f"{len(diff_rows)} of {len(rd['index'])} repo package(s) differ from upstream: "
+                f"{diff_counts['behind']} behind, {diff_counts['ahead']} ahead, "
+                f"{diff_counts['not_in_upstream']} not in upstream."
+            )
+            diff_summary_color = "#c0392b" if diff_counts["behind"] else "#e67e22"
+        else:
+            diff_summary = "Every repo package matches the upstream version."
+            diff_summary_color = "#27ae60"
+
         repos_js_entries.append({
             "label": label,
             "url": url,
             "pkg_data": pkg_data,
             "cmp_data": cmp_data,
+            "diff_data": diff_data,
             "summary": e(summary),
             "summary_color": summary_color,
+            "diff_summary": e(diff_summary),
+            "diff_summary_color": diff_summary_color,
         })
 
     # Build upstream JS data
@@ -336,7 +423,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
     )
     repo_tab_btns += (
         '\n    <button class="tab-btn repo-tab-btn" '
-        'onclick="switchRepoTab(\'upstream\', this)">Upstream</button>'
+        f'onclick="switchRepoTab(\'upstream\', this)">Upstream / {e(upstream_dist)}</button>'
     )
 
     # Generate repo panels (each with sub-tabs)
@@ -347,7 +434,8 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
   <div id="repo-{i}" class="repo-panel {active_panel}">
     <div class="tabs sub-tabs" style="margin-top:1rem">
       <button class="tab-btn sub-tab-btn active" onclick="switchSubTab('r{i}-pkg-list', this, {i})">Package List</button>
-      <button class="tab-btn sub-tab-btn" onclick="switchSubTab('r{i}-upstream-cmp', this, {i})">Upstream Comparison</button>
+      <button class="tab-btn sub-tab-btn" onclick="switchSubTab('r{i}-upstream-cmp', this, {i})">Live Build Comparison</button>
+      <button class="tab-btn sub-tab-btn" onclick="switchSubTab('r{i}-upstream-diff', this, {i})">Full Upstream Diff</button>
     </div>
 
     <div id="r{i}-pkg-list" class="sub-panel active">
@@ -377,17 +465,35 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       <div class="pagination" id="r{i}-cmp-pages" style="margin-bottom:0.6rem"></div>
       <div class="table-wrap">
         <table class="cmp-table">
-          <thead><tr><th>Package</th><th>Repo version</th><th>Upstream version (Sid)</th><th>Status</th></tr></thead>
+          <thead><tr><th>Package</th><th>Repo version</th><th>Upstream version ({e(upstream_dist)})</th><th>Status</th></tr></thead>
           <tbody id="r{i}-cmp-tbody"><tr><td colspan="4" style="color:#999;font-style:italic">Loading...</td></tr></tbody>
         </table>
       </div>
       <div class="pagination" id="r{i}-cmp-pages-bottom" style="margin-top:0.6rem"></div>
     </div>
+
+    <div id="r{i}-upstream-diff" class="sub-panel">
+      <div class="summary" style="color:{r['diff_summary_color']};font-weight:bold;margin:0.8rem 0">{r['diff_summary']}</div>
+      <div class="toolbar">
+        <input class="search-box" type="search" id="r{i}-diff-search"
+               placeholder="Search packages..." oninput="TABLES[{i}].diff.search(this.value)">
+        <span class="row-count" id="r{i}-diff-count"></span>
+        <span class="row-count">every repo package whose version differs from upstream</span>
+      </div>
+      <div class="pagination" id="r{i}-diff-pages" style="margin-bottom:0.6rem"></div>
+      <div class="table-wrap">
+        <table class="cmp-table">
+          <thead><tr><th>Package</th><th>Repo version</th><th>Upstream version ({e(upstream_dist)})</th><th>Status</th></tr></thead>
+          <tbody id="r{i}-diff-tbody"><tr><td colspan="4" style="color:#999;font-style:italic">Loading...</td></tr></tbody>
+        </table>
+      </div>
+      <div class="pagination" id="r{i}-diff-pages-bottom" style="margin-top:0.6rem"></div>
+    </div>
   </div>
 """
 
     # Generate upstream panel HTML
-    upstream_label = e(_repo_label(upstream_url))
+    upstream_label = e(_repo_label(upstream_url, upstream_dist))
     repo_panels_html += f"""
   <div id="repo-upstream" class="repo-panel">
     <div class="tabs sub-tabs" style="margin-top:1rem">
@@ -423,6 +529,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
     # Generate JS data arrays
     all_pkg_data = "[" + ",\n".join(r["pkg_data"] for r in repos_js_entries) + "]"
     all_cmp_data = "[" + ",\n".join(r["cmp_data"] for r in repos_js_entries) + "]"
+    all_diff_data = "[" + ",\n".join(r["diff_data"] for r in repos_js_entries) + "]"
 
     page = f"""<!DOCTYPE html>
 <html lang="en">
@@ -638,7 +745,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
   <div class="meta">
     Repositories: {repo_links}
     &nbsp;|&nbsp;
-    Upstream: <a href="{e(upstream_url)}">{e(upstream_url)}</a>
+    Upstream: <a href="{e(upstream_url)}">{e(upstream_url)}</a> ({e(upstream_dist)})
     &nbsp;|&nbsp; Generated: {e(generated_at)}
   </div>
 
@@ -650,6 +757,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
   <script>
     const ALL_PKG_DATA = {all_pkg_data};
     const ALL_CMP_DATA = {all_cmp_data};
+    const ALL_DIFF_DATA = {all_diff_data};
     const UPSTREAM_PKG_DATA = {upstream_pkg_data};
     const PAGE_SIZE = 100;
     const TABLES = [];
@@ -731,11 +839,24 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
     }}
 
     const STATUS_CLASS = {{
-      behind: 'ver-below', up_to_date: 'ver-above', not_in_repo: 'ver-missing', not_in_upstream: ''
+      behind: 'ver-below', up_to_date: 'ver-above', not_in_repo: 'ver-missing',
+      ahead: 'ver-above', not_in_upstream: ''
     }};
     const STATUS_LABEL = {{
-      behind: 'Behind', up_to_date: 'Up to date', not_in_repo: 'Not in repo', not_in_upstream: 'Not available in upstream'
+      behind: 'Behind', up_to_date: 'Up to date', not_in_repo: 'Not in repo',
+      ahead: 'Ahead', not_in_upstream: 'Not available in upstream'
     }};
+
+    function renderCmpRow(r) {{
+      const cls = STATUS_CLASS[r.s] || '';
+      const lbl = STATUS_LABEL[r.s] || r.s;
+      return '<tr>' +
+        '<td>' + escHtml(r.n) + '</td>' +
+        '<td class="' + cls + '">' + (escHtml(r.rv) || '—') + '</td>' +
+        '<td>' + (escHtml(r.uv) || '—') + '</td>' +
+        '<td class="' + cls + '">' + lbl + '</td>' +
+        '</tr>';
+    }}
 
     ALL_PKG_DATA.forEach((pkgData, i) => {{
       const pkg = makePaged(
@@ -748,18 +869,14 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       const cmp = makePaged(
         ALL_CMP_DATA[i],
         'r' + i + '-cmp-tbody', 'r' + i + '-cmp-pages', 'r' + i + '-cmp-pages-bottom', 'r' + i + '-cmp-count',
-        r => {{
-          const cls = STATUS_CLASS[r.s] || '';
-          const lbl = STATUS_LABEL[r.s] || r.s;
-          return '<tr>' +
-            '<td>' + escHtml(r.n) + '</td>' +
-            '<td class="' + cls + '">' + (escHtml(r.rv) || '—') + '</td>' +
-            '<td>' + (escHtml(r.uv) || '—') + '</td>' +
-            '<td class="' + cls + '">' + lbl + '</td>' +
-            '</tr>';
-        }}
+        renderCmpRow
       );
-      TABLES.push({{ pkg, cmp }});
+      const diff = makePaged(
+        ALL_DIFF_DATA[i],
+        'r' + i + '-diff-tbody', 'r' + i + '-diff-pages', 'r' + i + '-diff-pages-bottom', 'r' + i + '-diff-count',
+        renderCmpRow
+      );
+      TABLES.push({{ pkg, cmp, diff }});
     }});
 
     UPSTREAM_TABLE = makePaged(
@@ -851,32 +968,63 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
 
 # ── entry point ───────────────────────────────────────────────────────────────
 
+USAGE = """Usage:
+  untung.py --repo=<url>[@<dist>] [--repo=...] --upstream-repo=<url>[@<dist>] [--html=<dir>]
+
+A repo may name its suite after an '@', e.g.
+  --repo=http://arsip.blankonlinux.id/@verbeek
+Without one, every dist under {repo}/dists/ is indexed and merged.
+The upstream dist defaults to '%s'.""" % UPSTREAM_DEFAULT_DIST
+
+
+def parse_repo_arg(value):
+    """Split "<url>[@<dist>]" into (url, dist or None).
+
+    Only a trailing '@dist' counts: the separator must come after the last '/'
+    so that userinfo in a URL (http://user@host/) is left alone.
+    """
+    at = value.rfind("@")
+    if at == -1 or "/" in value[at + 1:] or not value[at + 1:]:
+        return value, None
+    return value[:at], value[at + 1:]
+
+
 def main():
-    repo_urls = []
+    repos = []            # list of (url, dist or None)
     upstream_repo = None
+    upstream_dist = UPSTREAM_DEFAULT_DIST
     html_dir = None
 
     for arg in sys.argv[1:]:
         if arg.startswith("--repo=") or arg.startswith("--repository="):
-            repo_urls.append(arg.split("=", 1)[1])
+            repos.append(parse_repo_arg(arg.split("=", 1)[1]))
         elif arg.startswith("--upstream-repo="):
-            upstream_repo = arg.split("=", 1)[1]
+            upstream_repo, dist = parse_repo_arg(arg.split("=", 1)[1])
+            if dist:
+                upstream_dist = dist
+        elif arg.startswith("--upstream-dist="):
+            upstream_dist = arg.split("=", 1)[1]
         elif arg.startswith("--html="):
             html_dir = arg.split("=", 1)[1]
+        elif arg in ("-h", "--help"):
+            print(USAGE)
+            sys.exit(0)
 
-    if not repo_urls:
-        print("Error: at least one --repo=<url> is required", file=sys.stderr)
+    if not repos:
+        print("Error: at least one --repo=<url> is required\n", file=sys.stderr)
+        print(USAGE, file=sys.stderr)
         sys.exit(1)
     if not upstream_repo:
-        print("Error: --upstream-repo=<url> is required", file=sys.stderr)
+        print("Error: --upstream-repo=<url> is required\n", file=sys.stderr)
+        print(USAGE, file=sys.stderr)
         sys.exit(1)
 
     packages = fetch_package_list()
-    upstream_index = build_upstream_index(upstream_repo)
+    upstream_index = build_upstream_index(upstream_repo, dist=upstream_dist)
 
     repo_data_list = []
-    for repo_url in repo_urls:
-        repo_index = build_package_index(repo_url)
+    for repo_url, repo_dist in repos:
+        repo_index = build_package_index(repo_url, dist=repo_dist)
 
         print(f"Comparing versions for {repo_url} ...", file=sys.stderr)
         results = compare_versions(packages, repo_index, upstream_index)
@@ -893,10 +1041,20 @@ def main():
             if not_in_repo:
                 print(f"  {len(not_in_repo)} package(s) not found in repo.", file=sys.stderr)
 
-        repo_data_list.append({"url": repo_url, "index": repo_index, "results": results})
+        diff = compare_repo_diff(repo_index, upstream_index)
+        print(f"  {len(diff)} of {len(repo_index)} repo package(s) differ from upstream.", file=sys.stderr)
+
+        repo_data_list.append({
+            "url": repo_url,
+            "dist": repo_dist,
+            "index": repo_index,
+            "results": results,
+            "diff": diff,
+        })
 
     if html_dir:
-        write_html_report(repo_data_list, html_dir, upstream_repo, upstream_index)
+        write_html_report(repo_data_list, html_dir, upstream_repo, upstream_index,
+                          upstream_dist)
 
 
 if __name__ == "__main__":
