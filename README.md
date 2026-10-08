@@ -28,6 +28,22 @@ The report renders two comparisons per repo, as tabs:
   package (the `Source:` field, so one group is one upload to test), or by
   the first one or two dash-separated parts of the package name.
 
+## Serving the report
+
+`--html=<dir>` writes `index.html` and a gzip-compressed copy,
+`index.html.gz`, about a sixth of its size. With nginx, let browsers download
+the compressed copy by turning on `gzip_static` (module
+`ngx_http_gzip_static_module`, included in Debian's nginx packages) where the
+report is served:
+
+```
+location / {
+    gzip_static on;
+}
+```
+
+Without it, nginx keeps serving the uncompressed `index.html`.
+
 ## Tests
 
 ```

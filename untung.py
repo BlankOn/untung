@@ -370,16 +370,45 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
             rows.append(row)
         return rows
 
+    # The page embeds every table, so rows ship compact: arrays instead of
+    # keyed objects, one-letter statuses, and each .deb's folder relative to
+    # its repo. The page's script expands them back on load.
+    status_codes = {"behind": "b", "ahead": "a", "up_to_date": "u",
+                    "not_in_repo": "r", "not_in_upstream": "n"}
+
+    def dumps(value):
+        return _json.dumps(value, separators=(",", ":"))
+
+    def base_of(repo_url):
+        # The same base fetch_packages() joins each Filename onto.
+        return repo_url.rstrip("/") + "/"
+
+    def pkg_rows(index, base):
+        rows = []
+        for name, info in sorted(index.items()):
+            folder = info["url"][:info["url"].rfind("/") + 1]
+            if folder.startswith(base):
+                folder = folder[len(base):]
+            rows.append([name, info["version"], folder])
+        return rows
+
+    def status_rows(rows):
+        packed = []
+        for r in rows:
+            row = [r["n"], r["rv"], r["uv"], status_codes[r["s"]]]
+            if "src" in r:
+                row.append(r["src"])
+            packed.append(row)
+        return packed
+
     # Build per-repo JS data blobs
     repos_js_entries = []
     for rd in repo_data_list:
-        pkg_data = _json.dumps(
-            [{"n": k, "v": info["version"], "u": info["url"]}
-             for k, info in sorted(rd["index"].items())]
-        )
-        cmp_data = _json.dumps(make_cmp_rows(rd["results"]))
+        base = base_of(rd["url"])
+        pkg_data = dumps(pkg_rows(rd["index"], base))
+        cmp_data = dumps(status_rows(make_cmp_rows(rd["results"])))
         diff_rows = make_diff_rows(rd.get("diff", []))
-        diff_data = _json.dumps(diff_rows)
+        diff_data = dumps(status_rows(diff_rows))
         label = e(_repo_label(rd["url"], rd.get("dist")))
         url = e(rd["url"])
         count_behind = sum(1 for r in rd["results"] if r["status"] == "behind")
@@ -408,6 +437,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         repos_js_entries.append({
             "label": label,
             "url": url,
+            "base": base,
             "pkg_data": pkg_data,
             "cmp_data": cmp_data,
             "diff_data": diff_data,
@@ -418,12 +448,8 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         })
 
     # Build upstream JS data
-    upstream_pkg_data = "[]"
-    if upstream_index:
-        upstream_pkg_data = _json.dumps(
-            [{"n": k, "v": info["version"], "u": info["url"]}
-             for k, info in sorted(upstream_index.items())]
-        )
+    upstream_base = base_of(upstream_url)
+    upstream_pkg_data = dumps(pkg_rows(upstream_index or {}, upstream_base))
 
     # Generate repo meta line
     repo_links = " &nbsp;|&nbsp; ".join(
@@ -558,6 +584,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
     all_pkg_data = "[" + ",\n".join(r["pkg_data"] for r in repos_js_entries) + "]"
     all_cmp_data = "[" + ",\n".join(r["cmp_data"] for r in repos_js_entries) + "]"
     all_diff_data = "[" + ",\n".join(r["diff_data"] for r in repos_js_entries) + "]"
+    repo_bases = dumps([r["base"] for r in repos_js_entries])
 
     page = f"""<!DOCTYPE html>
 <html lang="en">
@@ -809,6 +836,8 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
   {repo_panels_html}
 
   <script>
+    const REPO_BASES = {repo_bases};
+    const UPSTREAM_BASE = {dumps(upstream_base)};
     const ALL_PKG_DATA = {all_pkg_data};
     const ALL_CMP_DATA = {all_cmp_data};
     const ALL_DIFF_DATA = {all_diff_data};
@@ -1081,29 +1110,42 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       }};
     }}
 
-    ALL_PKG_DATA.forEach((pkgData, i) => {{
+    // Rows arrive as compact arrays (see write_html_report); expand them into
+    // the objects the tables render and search. A package row's folder is
+    // relative to its repo unless it is a full URL.
+    const STATUS_NAMES = {{ b: 'behind', a: 'ahead', u: 'up_to_date', r: 'not_in_repo', n: 'not_in_upstream' }};
+    const pkgObjects = rows => rows.map(([n, v, f]) => ({{ n, v, f }}));
+    const statusObjects = rows => rows.map(([n, rv, uv, s, src]) =>
+      src === undefined ? {{ n, rv, uv, s: STATUS_NAMES[s] }} : {{ n, rv, uv, s: STATUS_NAMES[s], src }});
+
+    function folderUrl(base, folder) {{
+      return folder.includes('://') ? folder : base + folder;
+    }}
+
+    function pkgRowRenderer(base) {{
+      return r => '<tr><td><a href="' + escHtml(folderUrl(base, r.f)) + '">' + escHtml(r.n) +
+        '</a></td><td>' + escHtml(r.v) + '</td></tr>';
+    }}
+
+    ALL_PKG_DATA.forEach((pkgRows, i) => {{
       const pkg = makePaged(
-        pkgData,
+        pkgObjects(pkgRows),
         'r' + i + '-pkg-tbody', 'r' + i + '-pkg-pages', 'r' + i + '-pkg-pages-bottom', 'r' + i + '-pkg-count',
-        r => '<tr><td>' + (r.u
-          ? '<a href="' + escHtml(r.u.substring(0, r.u.lastIndexOf('/') + 1)) + '">' + escHtml(r.n) + '</a>'
-          : escHtml(r.n)) + '</td><td>' + escHtml(r.v) + '</td></tr>'
+        pkgRowRenderer(REPO_BASES[i])
       );
       const cmp = makePaged(
-        ALL_CMP_DATA[i],
+        statusObjects(ALL_CMP_DATA[i]),
         'r' + i + '-cmp-tbody', 'r' + i + '-cmp-pages', 'r' + i + '-cmp-pages-bottom', 'r' + i + '-cmp-count',
         renderCmpRow
       );
-      const diff = makeDiffTable(i, ALL_DIFF_DATA[i]);
+      const diff = makeDiffTable(i, statusObjects(ALL_DIFF_DATA[i]));
       TABLES.push({{ pkg, cmp, diff }});
     }});
 
     UPSTREAM_TABLE = makePaged(
-      UPSTREAM_PKG_DATA,
+      pkgObjects(UPSTREAM_PKG_DATA),
       'upstream-pkg-tbody', 'upstream-pkg-pages', 'upstream-pkg-pages-bottom', 'upstream-pkg-count',
-      r => '<tr><td>' + (r.u
-        ? '<a href="' + escHtml(r.u.substring(0, r.u.lastIndexOf('/') + 1)) + '">' + escHtml(r.n) + '</a>'
-        : escHtml(r.n)) + '</td><td>' + escHtml(r.v) + '</td></tr>'
+      pkgRowRenderer(UPSTREAM_BASE)
     );
 
     function switchRepoTab(idx, btn) {{
@@ -1180,9 +1222,14 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
 
     os.makedirs(html_dir, exist_ok=True)
     out_path = os.path.join(html_dir, "index.html")
-    with open(out_path, "w") as f:
-        f.write(page)
-    print(f"HTML report written to {out_path}", file=sys.stderr)
+    page_bytes = page.encode("utf-8")
+    with open(out_path, "wb") as f:
+        f.write(page_bytes)
+    # A pre-compressed copy for nginx's gzip_static: about a tenth of the size,
+    # with no compression work per request.
+    with open(out_path + ".gz", "wb") as f:
+        f.write(gzip.compress(page_bytes, compresslevel=9))
+    print(f"HTML report written to {out_path} (+ .gz)", file=sys.stderr)
 
 
 # ── entry point ───────────────────────────────────────────────────────────────

@@ -77,32 +77,89 @@ class CompareRepoDiffSourceTest(unittest.TestCase):
         self.assertEqual(row["source"], "dnsmasq")
 
 
-class HtmlDiffDataTest(unittest.TestCase):
+def render_report(tmp, repos, upstream_url="http://upstream.example/debian/", upstream_index=None):
+    """Write the report into tmp and return the page text."""
+    with contextlib.redirect_stderr(io.StringIO()):
+        untung.write_html_report(repos, tmp, upstream_url, upstream_index)
+    return Path(tmp, "index.html").read_text(encoding="utf-8")
+
+
+def page_const(page, name):
+    """Return the JSON value the page assigns to `const <name>`."""
+    return json.loads(re.search(r"const %s = (.*?);\n" % name, page, re.S).group(1))
+
+
+def repo(url="http://repo.example/blankon/", index=None, results=None, diff=None):
+    return {"url": url, "index": index or {}, "results": results or [], "diff": diff or []}
+
+
+class HtmlReportDataTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
 
     def tearDown(self):
         shutil.rmtree(self.tmp)
 
-    def diff_rows(self, diff):
-        with contextlib.redirect_stderr(io.StringIO()):
-            untung.write_html_report(
-                [{"url": "http://repo.example/", "index": {}, "results": [], "diff": diff}],
-                self.tmp, "http://upstream.example/debian/",
-            )
-        page = Path(self.tmp, "index.html").read_text()
-        data = re.search(r"const ALL_DIFF_DATA = (.*?);\n", page, re.S).group(1)
-        return {r["n"]: r for r in json.loads(data)[0]}
+    def test_package_rows_store_folder_relative_to_repo(self):
+        page = render_report(self.tmp, [repo(index={"dnsmasq": {
+            "version": "2.93-1",
+            "url": "http://repo.example/blankon/pool/main/d/dnsmasq/dnsmasq_2.93-1_all.deb",
+        }})])
+        self.assertEqual(page_const(page, "REPO_BASES"), ["http://repo.example/blankon/"])
+        self.assertEqual(page_const(page, "ALL_PKG_DATA"), [[["dnsmasq", "2.93-1", "pool/main/d/dnsmasq/"]]])
+
+    def test_package_outside_repo_keeps_absolute_folder(self):
+        page = render_report(self.tmp, [repo(index={"odd": {
+            "version": "1", "url": "http://elsewhere.example/pool/o/odd/odd_1_all.deb",
+        }})])
+        self.assertEqual(page_const(page, "ALL_PKG_DATA"), [[["odd", "1", "http://elsewhere.example/pool/o/odd/"]]])
+
+    def test_upstream_rows_store_folder_relative_to_upstream(self):
+        page = render_report(self.tmp, [repo()], "https://mirror.example/debian/", {"dnsmasq": {
+            "version": "2.93-3",
+            "url": "https://mirror.example/debian/pool/main/d/dnsmasq/dnsmasq_2.93-3_all.deb",
+        }})
+        self.assertEqual(page_const(page, "UPSTREAM_BASE"), "https://mirror.example/debian/")
+        self.assertEqual(page_const(page, "UPSTREAM_PKG_DATA"), [["dnsmasq", "2.93-3", "pool/main/d/dnsmasq/"]])
+
+    def test_comparison_rows_use_status_codes(self):
+        page = render_report(self.tmp, [repo(results=[
+            {"package": "dpkg", "repo_version": "1.23.7", "repo_url": "u",
+             "upstream_version": "1.23.11", "status": "behind"},
+            {"package": "bash", "repo_version": "5.3-1", "repo_url": "u",
+             "upstream_version": "5.3-1", "status": "up_to_date"},
+            {"package": "gone", "repo_version": None, "repo_url": None,
+             "upstream_version": "1.0-1", "status": "not_in_repo"},
+            {"package": "blankon-keyring", "repo_version": "2026.1", "repo_url": "u",
+             "upstream_version": None, "status": "not_in_upstream"},
+        ])])
+        self.assertEqual(page_const(page, "ALL_CMP_DATA"), [[
+            ["dpkg", "1.23.7", "1.23.11", "b"],
+            ["gone", "", "1.0-1", "r"],
+            ["blankon-keyring", "2026.1", "", "n"],
+            ["bash", "5.3-1", "5.3-1", "u"],
+        ]])
 
     def test_diff_rows_name_source_only_when_it_differs(self):
-        rows = self.diff_rows([
+        page = render_report(self.tmp, [repo(diff=[
             {"package": "dnsmasq", "repo_version": "2.93-1", "repo_url": "u",
              "upstream_version": "2.93-3", "status": "behind", "source": "dnsmasq"},
             {"package": "dnsmasq-base", "repo_version": "2.93-1", "repo_url": "u",
              "upstream_version": "2.93-3", "status": "behind", "source": "dnsmasq"},
-        ])
-        self.assertNotIn("src", rows["dnsmasq"])
-        self.assertEqual(rows["dnsmasq-base"]["src"], "dnsmasq")
+            {"package": "mutter", "repo_version": "49.1-2", "repo_url": "u",
+             "upstream_version": "49.0-1", "status": "ahead", "source": "mutter"},
+        ])])
+        self.assertEqual(page_const(page, "ALL_DIFF_DATA"), [[
+            ["dnsmasq", "2.93-1", "2.93-3", "b"],
+            ["dnsmasq-base", "2.93-1", "2.93-3", "b", "dnsmasq"],
+            ["mutter", "49.1-2", "49.0-1", "a"],
+        ]])
+
+    def test_report_writes_matching_gzip_copy(self):
+        render_report(self.tmp, [repo()])
+        page = Path(self.tmp, "index.html").read_bytes()
+        packed = Path(self.tmp, "index.html.gz").read_bytes()
+        self.assertEqual(gzip.decompress(packed), page)
 
 
 if __name__ == "__main__":
