@@ -103,7 +103,11 @@ def fetch_release(repo_url, dist):
 
 
 def fetch_packages(repo_url, dist, component, arch="amd64"):
-    """Fetch and parse Packages.gz; return dict of binary package -> {version, url}."""
+    """
+    Fetch and parse Packages.gz; return dict of binary package ->
+    {version, url, source}. The source is the package's Source: field without
+    any "(version)" suffix, or the package's own name when the field is absent.
+    """
     base = repo_url.rstrip("/")
     url = f"{base}/dists/{dist}/{component}/binary-{arch}/Packages.gz"
     try:
@@ -120,12 +124,16 @@ def fetch_packages(repo_url, dist, component, arch="amd64"):
     current_pkg = None
     current_ver = None
     current_filename = None
+    current_source = None
 
     for line in text.splitlines():
         if line.startswith("Package:"):
             current_pkg = line.split(":", 1)[1].strip()
             current_ver = None
             current_filename = None
+            current_source = None
+        elif line.startswith("Source:"):
+            current_source = line.split(":", 1)[1].split()[0]
         elif line.startswith("Version:"):
             current_ver = line.split(":", 1)[1].strip()
         elif line.startswith("Filename:"):
@@ -136,6 +144,7 @@ def fetch_packages(repo_url, dist, component, arch="amd64"):
                     packages[current_pkg] = {
                         "version": current_ver,
                         "url": f"{base}/{current_filename}",
+                        "source": current_source or current_pkg,
                     }
     return packages
 
@@ -272,6 +281,7 @@ def compare_repo_diff(repo_index, upstream_index):
     results = []
     for pkg in sorted(repo_index):
         repo_ver = repo_index[pkg]["version"]
+        source = repo_index[pkg].get("source", pkg)
         upstream_info = upstream_index.get(pkg)
 
         if upstream_info is None:
@@ -281,6 +291,7 @@ def compare_repo_diff(repo_index, upstream_index):
                 "repo_url": repo_index[pkg]["url"],
                 "upstream_version": None,
                 "status": "not_in_upstream",
+                "source": source,
             })
             continue
 
@@ -294,6 +305,7 @@ def compare_repo_diff(repo_index, upstream_index):
             "repo_url": repo_index[pkg]["url"],
             "upstream_version": upstream_ver,
             "status": "behind" if version_lt(repo_ver, upstream_ver) else "ahead",
+            "source": source,
         })
 
     return results
@@ -344,15 +356,19 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
             [r for r in results if r["status"] == "ahead"] +
             [r for r in results if r["status"] == "not_in_upstream"]
         )
-        return [
-            {
+        rows = []
+        for r in ordered:
+            row = {
                 "n": r["package"],
                 "rv": r["repo_version"] or "",
                 "uv": r["upstream_version"] or "",
                 "s": r["status"],
             }
-            for r in ordered
-        ]
+            # Only name the source when it differs; the page falls back to "n".
+            if r.get("source", r["package"]) != r["package"]:
+                row["src"] = r["source"]
+            rows.append(row)
+        return rows
 
     # Build per-repo JS data blobs
     repos_js_entries = []
