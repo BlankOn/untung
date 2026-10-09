@@ -320,6 +320,12 @@ def _repo_label(url, dist=None):
     return f"{host} / {dist}" if dist else host
 
 
+def _short_name(url):
+    """First hostname label of a repo URL: "arsip-dev" for arsip-dev.example.org."""
+    from urllib.parse import urlparse
+    return (urlparse(url).hostname or url).split(".")[0]
+
+
 def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=None,
                       upstream_dist=UPSTREAM_DEFAULT_DIST):
     """
@@ -409,6 +415,8 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         cmp_data = dumps(status_rows(make_cmp_rows(rd["results"])))
         diff_rows = make_diff_rows(rd.get("diff", []))
         diff_data = dumps(status_rows(diff_rows))
+        peer_rows = make_diff_rows(rd["peer_diff"]) if rd.get("peer_diff") is not None else None
+        peer_data = dumps(status_rows(peer_rows)) if peer_rows is not None else "[]"
         label = e(_repo_label(rd["url"], rd.get("dist")))
         url = e(rd["url"])
         count_behind = sum(1 for r in rd["results"] if r["status"] == "behind")
@@ -434,7 +442,32 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
             diff_summary = "Every repo package matches the upstream version."
             diff_summary_color = "#27ae60"
 
+        peer = None
+        if peer_rows is not None:
+            peer_name = rd["peer_name"]
+            peer_counts = {
+                k: sum(1 for r in peer_rows if r["s"] == k)
+                for k in ("behind", "ahead", "not_in_upstream")
+            }
+            if peer_rows:
+                peer_summary = (
+                    f"{len(peer_rows)} of {len(rd['index'])} repo package(s) differ from {peer_name}: "
+                    f"{peer_counts['behind']} behind, {peer_counts['ahead']} ahead, "
+                    f"{peer_counts['not_in_upstream']} not in {peer_name}."
+                )
+                peer_color = "#c0392b" if peer_counts["behind"] else "#e67e22"
+            else:
+                peer_summary = f"Every repo package matches the {peer_name} version."
+                peer_color = "#27ae60"
+            peer = {
+                "name": e(peer_name),
+                "summary": e(peer_summary),
+                "summary_color": peer_color,
+            }
+
         repos_js_entries.append({
+            "peer": peer,
+            "peer_data": peer_data,
             "label": label,
             "url": url,
             "base": base,
@@ -468,6 +501,45 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         f'onclick="switchRepoTab(\'upstream\', this)">Upstream / {e(upstream_dist)}</button>'
     )
 
+    def peer_btn(i, r):
+        if not r["peer"]:
+            return ""
+        return (f'<button class="tab-btn sub-tab-btn" onclick="switchSubTab(\'r{i}-peer-diff\', this, {i})">'
+                f'Diff against {r["peer"]["name"]}</button>')
+
+    def diff_panel(i, key, panel, color, summary, against, col, note):
+        return f"""
+    <div id="r{i}-{panel}" class="sub-panel">
+      <div class="summary" style="color:{color};font-weight:bold;margin:0.8rem 0">{summary}</div>
+      <div class="toolbar">
+        <input class="search-box" type="search" id="r{i}-{key}-search"
+               placeholder="Search packages..." oninput="TABLES[{i}].{key}.search(this.value)">
+        <label class="group-by">Group by
+          <select class="group-select" id="r{i}-{key}-group" autocomplete="off" onchange="TABLES[{i}].{key}.groupBy(this.value)">
+            <option value="source" selected>Source package</option>
+            <option value="prefix1">Name prefix (1 level)</option>
+            <option value="prefix2">Name prefix (2 levels)</option>
+            <option value="none">None</option>
+          </select>
+        </label>
+        <span class="group-tools" id="r{i}-{key}-group-tools" hidden>
+          <button class="pg-btn" type="button" onclick="TABLES[{i}].{key}.expandPage()">Expand page</button>
+          <button class="pg-btn" type="button" onclick="TABLES[{i}].{key}.collapseAll()">Collapse all</button>
+        </span>
+        <span class="row-count" id="r{i}-{key}-count"></span>
+        <span class="row-count">{note}</span>
+      </div>
+      <div class="pagination" id="r{i}-{key}-pages" style="margin-bottom:0.6rem"></div>
+      <div class="table-wrap">
+        <table class="cmp-table">
+          <thead><tr><th>Package</th><th>Repo version</th><th>{col}</th><th>Status</th></tr></thead>
+          <tbody id="r{i}-{key}-tbody"><tr><td colspan="4" style="color:#999;font-style:italic">Loading...</td></tr></tbody>
+        </table>
+      </div>
+      <div class="pagination" id="r{i}-{key}-pages-bottom" style="margin-top:0.6rem"></div>
+    </div>
+"""
+
     # Generate repo panels (each with sub-tabs)
     repo_panels_html = ""
     for i, r in enumerate(repos_js_entries):
@@ -476,8 +548,9 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
   <div id="repo-{i}" class="repo-panel {active_panel}">
     <div class="tabs sub-tabs" style="margin-top:1rem">
       <button class="tab-btn sub-tab-btn active" onclick="switchSubTab('r{i}-pkg-list', this, {i})">Package List</button>
-      <button class="tab-btn sub-tab-btn" onclick="switchSubTab('r{i}-upstream-cmp', this, {i})">Live Build Comparison</button>
-      <button class="tab-btn sub-tab-btn" onclick="switchSubTab('r{i}-upstream-diff', this, {i})">Full Upstream Diff</button>
+      <button class="tab-btn sub-tab-btn" onclick="switchSubTab('r{i}-upstream-diff', this, {i})">Diff against upstream</button>
+      {peer_btn(i, r)}
+      <button class="tab-btn sub-tab-btn" onclick="switchSubTab('r{i}-upstream-cmp', this, {i})">Diff against upstream (live build only)</button>
     </div>
 
     <div id="r{i}-pkg-list" class="sub-panel active">
@@ -514,35 +587,12 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       <div class="pagination" id="r{i}-cmp-pages-bottom" style="margin-top:0.6rem"></div>
     </div>
 
-    <div id="r{i}-upstream-diff" class="sub-panel">
-      <div class="summary" style="color:{r['diff_summary_color']};font-weight:bold;margin:0.8rem 0">{r['diff_summary']}</div>
-      <div class="toolbar">
-        <input class="search-box" type="search" id="r{i}-diff-search"
-               placeholder="Search packages..." oninput="TABLES[{i}].diff.search(this.value)">
-        <label class="group-by">Group by
-          <select class="group-select" id="r{i}-diff-group" autocomplete="off" onchange="TABLES[{i}].diff.groupBy(this.value)">
-            <option value="none">None</option>
-            <option value="source">Source package</option>
-            <option value="prefix1">Name prefix (1 level)</option>
-            <option value="prefix2">Name prefix (2 levels)</option>
-          </select>
-        </label>
-        <span class="group-tools" id="r{i}-diff-group-tools" hidden>
-          <button class="pg-btn" type="button" onclick="TABLES[{i}].diff.expandPage()">Expand page</button>
-          <button class="pg-btn" type="button" onclick="TABLES[{i}].diff.collapseAll()">Collapse all</button>
-        </span>
-        <span class="row-count" id="r{i}-diff-count"></span>
-        <span class="row-count">every repo package whose version differs from upstream</span>
-      </div>
-      <div class="pagination" id="r{i}-diff-pages" style="margin-bottom:0.6rem"></div>
-      <div class="table-wrap">
-        <table class="cmp-table">
-          <thead><tr><th>Package</th><th>Repo version</th><th>Upstream version ({e(upstream_dist)})</th><th>Status</th></tr></thead>
-          <tbody id="r{i}-diff-tbody"><tr><td colspan="4" style="color:#999;font-style:italic">Loading...</td></tr></tbody>
-        </table>
-      </div>
-      <div class="pagination" id="r{i}-diff-pages-bottom" style="margin-top:0.6rem"></div>
-    </div>
+{diff_panel(i, "diff", "upstream-diff", r['diff_summary_color'], r['diff_summary'],
+                "upstream", "Upstream version (" + e(upstream_dist) + ")",
+                "every repo package whose version differs from upstream")}
+{diff_panel(i, "peer", "peer-diff", r['peer']['summary_color'], r['peer']['summary'],
+                r['peer']['name'], "Version in " + r['peer']['name'],
+                "every repo package whose version differs from " + r['peer']['name']) if r['peer'] else ""}
   </div>
 """
 
@@ -584,6 +634,8 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
     all_pkg_data = "[" + ",\n".join(r["pkg_data"] for r in repos_js_entries) + "]"
     all_cmp_data = "[" + ",\n".join(r["cmp_data"] for r in repos_js_entries) + "]"
     all_diff_data = "[" + ",\n".join(r["diff_data"] for r in repos_js_entries) + "]"
+    all_peer_data = "[" + ",\n".join(r["peer_data"] for r in repos_js_entries) + "]"
+    peer_names = dumps([r["peer"] and r["peer"]["name"] for r in repos_js_entries])
     repo_bases = dumps([r["base"] for r in repos_js_entries])
 
     page = f"""<!DOCTYPE html>
@@ -695,9 +747,8 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
     .meta {{ color: #666; font-size: 0.9rem; margin-bottom: 1rem; line-height: 1.7; overflow-wrap: anywhere; }}
     .tabs {{
       display: flex; gap: 0; border-bottom: 2px solid #ddd;
-      overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none;
+      flex-wrap: wrap;
     }}
-    .tabs::-webkit-scrollbar {{ display: none; }}
     .tab-btn {{
       padding: 0.5rem 1.2rem; cursor: pointer; border: 1px solid transparent;
       border-bottom: none; background: none; font-family: inherit; font-size: 0.95rem;
@@ -841,7 +892,9 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
     const ALL_PKG_DATA = {all_pkg_data};
     const ALL_CMP_DATA = {all_cmp_data};
     const ALL_DIFF_DATA = {all_diff_data};
+    const ALL_PEER_DATA = {all_peer_data};
     const UPSTREAM_PKG_DATA = {upstream_pkg_data};
+    const PEER_NAMES = {peer_names};
     const PAGE_SIZE = 100;
     const TABLES = [];
     let UPSTREAM_TABLE;
@@ -953,9 +1006,9 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       ahead: 'Ahead', not_in_upstream: 'Not available in upstream'
     }};
 
-    function cmpRow(r, trClass = '', before = '', after = '') {{
+    function cmpRow(r, trClass = '', before = '', after = '', labels = STATUS_LABEL) {{
       const cls = STATUS_CLASS[r.s] || '';
-      const lbl = STATUS_LABEL[r.s] || r.s;
+      const lbl = labels[r.s] || r.s;
       return '<tr' + (trClass ? ' class="' + trClass + '"' : '') + '>' +
         '<td>' + before + escHtml(r.n) + after + '</td>' +
         '<td class="' + cls + '">' + (escHtml(r.rv) || '—') + '</td>' +
@@ -966,7 +1019,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
 
     function renderCmpRow(r) {{ return cmpRow(r); }}
 
-    // ── grouped Full Upstream Diff ──
+    // ── grouped diff tables ──
     // Rows can be grouped by Debian source package or by the first one or two
     // dash-separated parts of the name; a group expands into its packages.
     const GROUP_KEY = {{
@@ -1001,8 +1054,9 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         : '<span class="mixed">mixed (' + distinct + ')</span>';
     }}
 
-    function makeDiffTable(i, rows) {{
-      const tbodyId = 'r' + i + '-diff-tbody';
+    function makeDiffTable(i, rows, key, labels = STATUS_LABEL) {{
+      const tbodyId = 'r' + i + '-' + key + '-tbody';
+      const cmpRowL = (r, c, b, a) => cmpRow(r, c, b, a, labels);
       const groupsByMode = {{}};
       const expanded = new Map();   // group key -> open?, set by the viewer
       let mode = 'none';
@@ -1015,7 +1069,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         if (g.total === 1) {{
           // A group of one is just a package: nothing to expand.
           const r = g.items[0];
-          return cmpRow(r, '', '<span class="chev-pad"></span>',
+          return cmpRowL(r, '', '<span class="chev-pad"></span>',
             r.n !== g.k ? '<span class="grp-src">' + escHtml(g.k) + '</span>' : '');
         }}
         const counts = {{}};
@@ -1025,7 +1079,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         const cls = STATUS_CLASS[worst] || '';
         const note = statuses.length > 1
           ? '<span class="grp-note">' +
-            statuses.map(s => counts[s] + ' ' + STATUS_LABEL[s].toLowerCase()).join(' · ') + '</span>'
+            statuses.map(s => counts[s] + ' ' + labels[s].toLowerCase()).join(' · ') + '</span>'
           : '';
         const open = isOpen(g);
         const count = g.items.length === g.total ? g.total : g.items.length + '/' + g.total;
@@ -1034,8 +1088,8 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
           '<td>' + CHEVRON + escHtml(g.k) + '<span class="grp-count">' + count + '</span></td>' +
           '<td class="' + cls + '">' + sameOrMixed(g.items.map(r => r.rv)) + '</td>' +
           '<td>' + sameOrMixed(g.items.map(r => r.uv)) + '</td>' +
-          '<td class="' + cls + '">' + STATUS_LABEL[worst] + note + '</td></tr>';
-        if (open) html += g.items.map(r => cmpRow(r, 'grp-child')).join('');
+          '<td class="' + cls + '">' + labels[worst] + note + '</td></tr>';
+        if (open) html += g.items.map(r => cmpRowL(r, 'grp-child')).join('');
         return html;
       }}
 
@@ -1057,8 +1111,8 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
 
       const table = makePaged(
         rows,
-        tbodyId, 'r' + i + '-diff-pages', 'r' + i + '-diff-pages-bottom', 'r' + i + '-diff-count',
-        x => mode === 'none' ? renderCmpRow(x) : renderGroup(x),
+        tbodyId, 'r' + i + '-' + key + '-pages', 'r' + i + '-' + key + '-pages-bottom', 'r' + i + '-' + key + '-count',
+        x => mode === 'none' ? cmpRowL(x) : renderGroup(x),
         {{
           filter: (data, lq) => mode === 'none' ? data.filter(r => rowMatches(r, lq)) : filterGroups(data, lq),
           count: (shown, all) => mode === 'none' ? null : countGroups(shown, all),
@@ -1092,7 +1146,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         groupBy(m) {{
           mode = m;
           expanded.clear();
-          document.getElementById('r' + i + '-diff-group-tools').hidden = m === 'none';
+          document.getElementById('r' + i + '-' + key + '-group-tools').hidden = m === 'none';
           if (m !== 'none' && !groupsByMode[m]) groupsByMode[m] = groupRows(rows, GROUP_KEY[m]);
           table.setData(m === 'none' ? rows : groupsByMode[m]);
         }},
@@ -1138,8 +1192,15 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         'r' + i + '-cmp-tbody', 'r' + i + '-cmp-pages', 'r' + i + '-cmp-pages-bottom', 'r' + i + '-cmp-count',
         renderCmpRow
       );
-      const diff = makeDiffTable(i, statusObjects(ALL_DIFF_DATA[i]));
-      TABLES.push({{ pkg, cmp, diff }});
+      const diff = makeDiffTable(i, statusObjects(ALL_DIFF_DATA[i]), 'diff');
+      diff.groupBy('source');
+      const tables = {{ pkg, cmp, diff }};
+      if (document.getElementById('r' + i + '-peer-tbody')) {{
+        tables.peer = makeDiffTable(i, statusObjects(ALL_PEER_DATA[i]), 'peer',
+          {{ ...STATUS_LABEL, not_in_upstream: 'Not in ' + PEER_NAMES[i] }});
+        tables.peer.groupBy('source');
+      }}
+      TABLES.push(tables);
     }});
 
     UPSTREAM_TABLE = makePaged(
@@ -1317,6 +1378,15 @@ def main():
             "results": results,
             "diff": diff,
         })
+
+    # The first two repos are also compared against each other.
+    if len(repo_data_list) > 1:
+        for one, other in ((0, 1), (1, 0)):
+            this, peer = repo_data_list[one], repo_data_list[other]
+            this["peer_name"] = _short_name(peer["url"])
+            this["peer_diff"] = compare_repo_diff(this["index"], peer["index"])
+            print(f"{len(this['peer_diff'])} of {len(this['index'])} package(s) in {this['url']} "
+                  f"differ from {this['peer_name']}.", file=sys.stderr)
 
     if html_dir:
         write_html_report(repo_data_list, html_dir, upstream_repo, upstream_index,
