@@ -103,7 +103,11 @@ def fetch_release(repo_url, dist):
 
 
 def fetch_packages(repo_url, dist, component, arch="amd64"):
-    """Fetch and parse Packages.gz; return dict of binary package -> {version, url}."""
+    """
+    Fetch and parse Packages.gz; return dict of binary package ->
+    {version, url, source}. The source is the package's Source: field without
+    any "(version)" suffix, or the package's own name when the field is absent.
+    """
     base = repo_url.rstrip("/")
     url = f"{base}/dists/{dist}/{component}/binary-{arch}/Packages.gz"
     try:
@@ -120,12 +124,16 @@ def fetch_packages(repo_url, dist, component, arch="amd64"):
     current_pkg = None
     current_ver = None
     current_filename = None
+    current_source = None
 
     for line in text.splitlines():
         if line.startswith("Package:"):
             current_pkg = line.split(":", 1)[1].strip()
             current_ver = None
             current_filename = None
+            current_source = None
+        elif line.startswith("Source:"):
+            current_source = line.split(":", 1)[1].split()[0]
         elif line.startswith("Version:"):
             current_ver = line.split(":", 1)[1].strip()
         elif line.startswith("Filename:"):
@@ -136,6 +144,7 @@ def fetch_packages(repo_url, dist, component, arch="amd64"):
                     packages[current_pkg] = {
                         "version": current_ver,
                         "url": f"{base}/{current_filename}",
+                        "source": current_source or current_pkg,
                     }
     return packages
 
@@ -272,6 +281,7 @@ def compare_repo_diff(repo_index, upstream_index):
     results = []
     for pkg in sorted(repo_index):
         repo_ver = repo_index[pkg]["version"]
+        source = repo_index[pkg].get("source", pkg)
         upstream_info = upstream_index.get(pkg)
 
         if upstream_info is None:
@@ -281,6 +291,7 @@ def compare_repo_diff(repo_index, upstream_index):
                 "repo_url": repo_index[pkg]["url"],
                 "upstream_version": None,
                 "status": "not_in_upstream",
+                "source": source,
             })
             continue
 
@@ -294,6 +305,7 @@ def compare_repo_diff(repo_index, upstream_index):
             "repo_url": repo_index[pkg]["url"],
             "upstream_version": upstream_ver,
             "status": "behind" if version_lt(repo_ver, upstream_ver) else "ahead",
+            "source": source,
         })
 
     return results
@@ -344,26 +356,59 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
             [r for r in results if r["status"] == "ahead"] +
             [r for r in results if r["status"] == "not_in_upstream"]
         )
-        return [
-            {
+        rows = []
+        for r in ordered:
+            row = {
                 "n": r["package"],
                 "rv": r["repo_version"] or "",
                 "uv": r["upstream_version"] or "",
                 "s": r["status"],
             }
-            for r in ordered
-        ]
+            # Only name the source when it differs; the page falls back to "n".
+            if r.get("source", r["package"]) != r["package"]:
+                row["src"] = r["source"]
+            rows.append(row)
+        return rows
+
+    # The page embeds every table, so rows ship compact: arrays instead of
+    # keyed objects, one-letter statuses, and each .deb's folder relative to
+    # its repo. The page's script expands them back on load.
+    status_codes = {"behind": "b", "ahead": "a", "up_to_date": "u",
+                    "not_in_repo": "r", "not_in_upstream": "n"}
+
+    def dumps(value):
+        return _json.dumps(value, separators=(",", ":"))
+
+    def base_of(repo_url):
+        # The same base fetch_packages() joins each Filename onto.
+        return repo_url.rstrip("/") + "/"
+
+    def pkg_rows(index, base):
+        rows = []
+        for name, info in sorted(index.items()):
+            folder = info["url"][:info["url"].rfind("/") + 1]
+            if folder.startswith(base):
+                folder = folder[len(base):]
+            rows.append([name, info["version"], folder])
+        return rows
+
+    def status_rows(rows):
+        packed = []
+        for r in rows:
+            row = [r["n"], r["rv"], r["uv"], status_codes[r["s"]]]
+            if "src" in r:
+                row.append(r["src"])
+            packed.append(row)
+        return packed
 
     # Build per-repo JS data blobs
     repos_js_entries = []
     for rd in repo_data_list:
-        pkg_data = _json.dumps(
-            [{"n": k, "v": info["version"], "u": info["url"]}
-             for k, info in sorted(rd["index"].items())]
-        )
-        cmp_data = _json.dumps(make_cmp_rows(rd["results"]))
+        base = base_of(rd["url"])
+        pkg_data = dumps(pkg_rows(rd["index"], base))
+        cmp_data = dumps(status_rows(make_cmp_rows(rd["results"])))
         diff_rows = make_diff_rows(rd.get("diff", []))
-        diff_data = _json.dumps(diff_rows)
+        diff_data = dumps(status_rows(diff_rows))
         label = e(_repo_label(rd["url"], rd.get("dist")))
         url = e(rd["url"])
         count_behind = sum(1 for r in rd["results"] if r["status"] == "behind")
@@ -392,6 +437,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         repos_js_entries.append({
             "label": label,
             "url": url,
+            "base": base,
             "pkg_data": pkg_data,
             "cmp_data": cmp_data,
             "diff_data": diff_data,
@@ -402,12 +448,8 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         })
 
     # Build upstream JS data
-    upstream_pkg_data = "[]"
-    if upstream_index:
-        upstream_pkg_data = _json.dumps(
-            [{"n": k, "v": info["version"], "u": info["url"]}
-             for k, info in sorted(upstream_index.items())]
-        )
+    upstream_base = base_of(upstream_url)
+    upstream_pkg_data = dumps(pkg_rows(upstream_index or {}, upstream_base))
 
     # Generate repo meta line
     repo_links = " &nbsp;|&nbsp; ".join(
@@ -477,6 +519,18 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       <div class="toolbar">
         <input class="search-box" type="search" id="r{i}-diff-search"
                placeholder="Search packages..." oninput="TABLES[{i}].diff.search(this.value)">
+        <label class="group-by">Group by
+          <select class="group-select" id="r{i}-diff-group" autocomplete="off" onchange="TABLES[{i}].diff.groupBy(this.value)">
+            <option value="none">None</option>
+            <option value="source">Source package</option>
+            <option value="prefix1">Name prefix (1 level)</option>
+            <option value="prefix2">Name prefix (2 levels)</option>
+          </select>
+        </label>
+        <span class="group-tools" id="r{i}-diff-group-tools" hidden>
+          <button class="pg-btn" type="button" onclick="TABLES[{i}].diff.expandPage()">Expand page</button>
+          <button class="pg-btn" type="button" onclick="TABLES[{i}].diff.collapseAll()">Collapse all</button>
+        </span>
         <span class="row-count" id="r{i}-diff-count"></span>
         <span class="row-count">every repo package whose version differs from upstream</span>
       </div>
@@ -530,6 +584,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
     all_pkg_data = "[" + ",\n".join(r["pkg_data"] for r in repos_js_entries) + "]"
     all_cmp_data = "[" + ",\n".join(r["cmp_data"] for r in repos_js_entries) + "]"
     all_diff_data = "[" + ",\n".join(r["diff_data"] for r in repos_js_entries) + "]"
+    repo_bases = dumps([r["base"] for r in repos_js_entries])
 
     page = f"""<!DOCTYPE html>
 <html lang="en">
@@ -682,6 +737,32 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
     .ver-above {{ color: #27ae60; font-weight: bold; }}
     .ver-below {{ color: #c0392b; font-weight: bold; }}
     .ver-missing {{ color: #e67e22; font-weight: bold; }}
+
+    /* ── grouped diff ── */
+    .group-by {{ display: inline-flex; align-items: center; gap: 0.4rem; color: #666; font-size: 0.85rem; }}
+    .group-select {{
+      padding: 0.35rem 0.5rem; font-family: inherit; font-size: 16px; color: #333;
+      border: 1px solid #ccc; border-radius: 4px; background: #fff;
+    }}
+    .group-tools {{ display: inline-flex; gap: 0.3rem; }}
+    .group-tools[hidden] {{ display: none; }}
+    tr.grp {{ cursor: pointer; }}
+    tr.grp > td:first-child {{ font-weight: 600; white-space: nowrap; }}
+    tr.grp:hover > td {{ background: #f6f9ff; }}
+    .chev {{ width: 12px; height: 12px; margin-right: 0.35rem; vertical-align: -1px;
+      color: #777; transition: transform 0.12s; }}
+    tr.grp.open .chev {{ transform: rotate(90deg); }}
+    .chev-pad {{ display: inline-block; width: 12px; margin-right: 0.35rem; }}
+    .grp-count {{
+      display: inline-block; margin-left: 0.4rem; padding: 0 0.45rem; border-radius: 999px;
+      background: #eef1f5; color: #555; font-size: 0.75rem; font-weight: 600; line-height: 1.5;
+    }}
+    tr.grp-child > td {{ background: #fcfcfc; }}
+    tr.grp-child > td:first-child {{ padding-left: 2.1rem; }}
+    .mixed {{ color: #888; font-style: italic; font-weight: normal; }}
+    .grp-note {{ display: block; color: #888; font-weight: normal; font-size: 0.78rem; }}
+    .grp-src {{ margin-left: 0.4rem; color: #999; font-weight: normal; font-size: 0.8rem; }}
+    @media (prefers-reduced-motion: reduce) {{ .chev {{ transition: none; }} }}
     a {{ color: var(--link); }}
     footer {{ margin-top: 2rem; padding-top: 1rem; border-top: 1px solid #eee;
       color: #999; font-size: 0.82rem; overflow-wrap: anywhere; }}
@@ -755,6 +836,8 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
   {repo_panels_html}
 
   <script>
+    const REPO_BASES = {repo_bases};
+    const UPSTREAM_BASE = {dumps(upstream_base)};
     const ALL_PKG_DATA = {all_pkg_data};
     const ALL_CMP_DATA = {all_cmp_data};
     const ALL_DIFF_DATA = {all_diff_data};
@@ -767,9 +850,18 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       return String(s ?? '').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
     }}
 
-    function makePaged(allData, tbodyId, topPagesId, botPagesId, countId, renderRow) {{
+    function rowMatches(r, lq) {{
+      return Object.values(r).some(v => String(v).toLowerCase().includes(lq));
+    }}
+
+    // opts.filter(data, lq) and opts.count(filtered, allData) replace the row
+    // search and the "N packages" counter, for tables whose items are groups.
+    function makePaged(allData, tbodyId, topPagesId, botPagesId, countId, renderRow, opts = {{}}) {{
+      const filterItems = opts.filter || ((data, lq) => data.filter(r => rowMatches(r, lq)));
+      let query = '';
       let filtered = allData;
       let currentPage = 1;
+      let searchTimer;
 
       function totalPages() {{ return Math.max(1, Math.ceil(filtered.length / PAGE_SIZE)); }}
 
@@ -779,8 +871,8 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         document.getElementById(tbodyId).innerHTML = slice.map(renderRow).join('');
         const total = allData.length;
         const shown = filtered.length;
-        document.getElementById(countId).textContent =
-          shown === total ? total + ' packages' : shown + ' of ' + total + ' packages';
+        document.getElementById(countId).textContent = (opts.count && opts.count(filtered, allData)) ||
+          (shown === total ? total + ' packages' : shown + ' of ' + total + ' packages');
         renderPager(topPagesId);
         renderPager(botPagesId);
       }}
@@ -818,17 +910,31 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         el.querySelectorAll('button').forEach(b => b._t = obj);
       }}
 
+      function applyFilter() {{
+        const lq = query.toLowerCase();
+        filtered = lq ? filterItems(allData, lq) : allData;
+      }}
+
+      // Wait for typing to pause: re-filtering ~78k rows on every key stutters.
       function search(q) {{
-        const lq = q.toLowerCase();
-        filtered = lq ? allData.filter(r =>
-          Object.values(r).some(v => String(v).toLowerCase().includes(lq))
-        ) : allData;
-        currentPage = 1;
-        render();
+        clearTimeout(searchTimer);
+        searchTimer = setTimeout(() => {{
+          query = q;
+          applyFilter();
+          currentPage = 1;
+          render();
+        }}, 150);
       }}
 
       const obj = {{
         search,
+        setData(data) {{ allData = data; applyFilter(); currentPage = 1; render(); }},
+        refresh: render,
+        items() {{ return filtered; }},
+        pageItems() {{
+          const start = (currentPage - 1) * PAGE_SIZE;
+          return filtered.slice(start, start + PAGE_SIZE);
+        }},
         goto(p) {{ currentPage = Math.min(Math.max(1, p), totalPages()); render(); }},
         prev() {{ obj.goto(currentPage - 1); }},
         next() {{ obj.goto(currentPage + 1); }},
@@ -847,44 +953,199 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       ahead: 'Ahead', not_in_upstream: 'Not available in upstream'
     }};
 
-    function renderCmpRow(r) {{
+    function cmpRow(r, trClass = '', before = '', after = '') {{
       const cls = STATUS_CLASS[r.s] || '';
       const lbl = STATUS_LABEL[r.s] || r.s;
-      return '<tr>' +
-        '<td>' + escHtml(r.n) + '</td>' +
+      return '<tr' + (trClass ? ' class="' + trClass + '"' : '') + '>' +
+        '<td>' + before + escHtml(r.n) + after + '</td>' +
         '<td class="' + cls + '">' + (escHtml(r.rv) || '—') + '</td>' +
         '<td>' + (escHtml(r.uv) || '—') + '</td>' +
         '<td class="' + cls + '">' + lbl + '</td>' +
         '</tr>';
     }}
 
-    ALL_PKG_DATA.forEach((pkgData, i) => {{
+    function renderCmpRow(r) {{ return cmpRow(r); }}
+
+    // ── grouped Full Upstream Diff ──
+    // Rows can be grouped by Debian source package or by the first one or two
+    // dash-separated parts of the name; a group expands into its packages.
+    const GROUP_KEY = {{
+      source: r => r.src || r.n,
+      prefix1: r => r.n.split('-')[0],
+      prefix2: r => r.n.split('-').slice(0, 2).join('-'),
+    }};
+    const STATUS_RANK = {{ behind: 0, not_in_upstream: 1, ahead: 2 }};
+    const AUTO_OPEN_MAX = 20;
+    const CHEVRON = '<svg class="chev" viewBox="0 0 12 12" fill="none" stroke="currentColor" ' +
+      'stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">' +
+      '<path d="M4.5 2.5 8 6l-3.5 3.5"/></svg>';
+
+    function escAttr(s) {{ return escHtml(s).replace(/"/g, '&quot;'); }}
+
+    function groupRows(rows, keyOf) {{
+      const groups = new Map();
+      for (const r of rows) {{
+        const k = keyOf(r);
+        if (!groups.has(k)) groups.set(k, []);
+        groups.get(k).push(r);
+      }}
+      return [...groups]
+        .sort((a, b) => a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)
+        .map(([k, items]) => ({{ k, items, total: items.length }}));
+    }}
+
+    function sameOrMixed(values) {{
+      const distinct = new Set(values).size;
+      return distinct === 1
+        ? (escHtml(values[0]) || '—')
+        : '<span class="mixed">mixed (' + distinct + ')</span>';
+    }}
+
+    function makeDiffTable(i, rows) {{
+      const tbodyId = 'r' + i + '-diff-tbody';
+      const groupsByMode = {{}};
+      const expanded = new Map();   // group key -> open?, set by the viewer
+      let mode = 'none';
+
+      // Small groups open by themselves while a search is active.
+      function opensItself(g) {{ return g.searched && g.items.length <= AUTO_OPEN_MAX; }}
+      function isOpen(g) {{ return expanded.has(g.k) ? expanded.get(g.k) : opensItself(g); }}
+
+      function renderGroup(g) {{
+        if (g.total === 1) {{
+          // A group of one is just a package: nothing to expand.
+          const r = g.items[0];
+          return cmpRow(r, '', '<span class="chev-pad"></span>',
+            r.n !== g.k ? '<span class="grp-src">' + escHtml(g.k) + '</span>' : '');
+        }}
+        const counts = {{}};
+        g.items.forEach(r => counts[r.s] = (counts[r.s] || 0) + 1);
+        const statuses = Object.keys(counts).sort((a, b) => STATUS_RANK[a] - STATUS_RANK[b]);
+        const worst = statuses[0];
+        const cls = STATUS_CLASS[worst] || '';
+        const note = statuses.length > 1
+          ? '<span class="grp-note">' +
+            statuses.map(s => counts[s] + ' ' + STATUS_LABEL[s].toLowerCase()).join(' · ') + '</span>'
+          : '';
+        const open = isOpen(g);
+        const count = g.items.length === g.total ? g.total : g.items.length + '/' + g.total;
+        let html = '<tr class="grp' + (open ? ' open' : '') + '" tabindex="0" ' +
+          'aria-expanded="' + open + '" data-k="' + escAttr(g.k) + '">' +
+          '<td>' + CHEVRON + escHtml(g.k) + '<span class="grp-count">' + count + '</span></td>' +
+          '<td class="' + cls + '">' + sameOrMixed(g.items.map(r => r.rv)) + '</td>' +
+          '<td>' + sameOrMixed(g.items.map(r => r.uv)) + '</td>' +
+          '<td class="' + cls + '">' + STATUS_LABEL[worst] + note + '</td></tr>';
+        if (open) html += g.items.map(r => cmpRow(r, 'grp-child')).join('');
+        return html;
+      }}
+
+      function filterGroups(groups, lq) {{
+        const out = [];
+        for (const g of groups) {{
+          const items = g.items.filter(r => rowMatches(r, lq));
+          if (items.length) out.push({{ k: g.k, items, total: g.total, searched: true }});
+        }}
+        return out;
+      }}
+
+      function countGroups(shown, all) {{
+        const packages = shown.reduce((n, g) => n + g.items.length, 0);
+        return shown === all
+          ? all.length + ' groups · ' + rows.length + ' packages'
+          : shown.length + ' of ' + all.length + ' groups · ' + packages + ' of ' + rows.length + ' packages';
+      }}
+
+      const table = makePaged(
+        rows,
+        tbodyId, 'r' + i + '-diff-pages', 'r' + i + '-diff-pages-bottom', 'r' + i + '-diff-count',
+        x => mode === 'none' ? renderCmpRow(x) : renderGroup(x),
+        {{
+          filter: (data, lq) => mode === 'none' ? data.filter(r => rowMatches(r, lq)) : filterGroups(data, lq),
+          count: (shown, all) => mode === 'none' ? null : countGroups(shown, all),
+        }}
+      );
+
+      const tbody = document.getElementById(tbodyId);
+      function toggle(tr, refocus) {{
+        const k = tr.dataset.k;
+        expanded.set(k, !tr.classList.contains('open'));
+        table.refresh();
+        if (refocus) {{
+          const again = [...tbody.querySelectorAll('tr.grp')].find(el => el.dataset.k === k);
+          if (again) again.focus();
+        }}
+      }}
+      tbody.addEventListener('click', e => {{
+        const tr = e.target.closest('tr.grp');
+        if (tr) toggle(tr, false);
+      }});
+      tbody.addEventListener('keydown', e => {{
+        const tr = e.target.closest('tr.grp');
+        if (tr && (e.key === 'Enter' || e.key === ' ')) {{
+          e.preventDefault();
+          toggle(tr, true);
+        }}
+      }});
+
+      return {{
+        search: table.search,
+        groupBy(m) {{
+          mode = m;
+          expanded.clear();
+          document.getElementById('r' + i + '-diff-group-tools').hidden = m === 'none';
+          if (m !== 'none' && !groupsByMode[m]) groupsByMode[m] = groupRows(rows, GROUP_KEY[m]);
+          table.setData(m === 'none' ? rows : groupsByMode[m]);
+        }},
+        expandPage() {{
+          table.pageItems().forEach(g => {{ if (g.total > 1) expanded.set(g.k, true); }});
+          table.refresh();
+        }},
+        collapseAll() {{
+          // Forget earlier choices and keep only the groups a search opened shut,
+          // so a later search still opens its matches.
+          expanded.clear();
+          table.items().forEach(g => {{ if (opensItself(g)) expanded.set(g.k, false); }});
+          table.refresh();
+        }},
+      }};
+    }}
+
+    // Rows arrive as compact arrays (see write_html_report); expand them into
+    // the objects the tables render and search. A package row's folder is
+    // relative to its repo unless it is a full URL.
+    const STATUS_NAMES = {{ b: 'behind', a: 'ahead', u: 'up_to_date', r: 'not_in_repo', n: 'not_in_upstream' }};
+    const pkgObjects = rows => rows.map(([n, v, f]) => ({{ n, v, f }}));
+    const statusObjects = rows => rows.map(([n, rv, uv, s, src]) =>
+      src === undefined ? {{ n, rv, uv, s: STATUS_NAMES[s] }} : {{ n, rv, uv, s: STATUS_NAMES[s], src }});
+
+    function folderUrl(base, folder) {{
+      return folder.includes('://') ? folder : base + folder;
+    }}
+
+    function pkgRowRenderer(base) {{
+      return r => '<tr><td><a href="' + escHtml(folderUrl(base, r.f)) + '">' + escHtml(r.n) +
+        '</a></td><td>' + escHtml(r.v) + '</td></tr>';
+    }}
+
+    ALL_PKG_DATA.forEach((pkgRows, i) => {{
       const pkg = makePaged(
-        pkgData,
+        pkgObjects(pkgRows),
         'r' + i + '-pkg-tbody', 'r' + i + '-pkg-pages', 'r' + i + '-pkg-pages-bottom', 'r' + i + '-pkg-count',
-        r => '<tr><td>' + (r.u
-          ? '<a href="' + escHtml(r.u.substring(0, r.u.lastIndexOf('/') + 1)) + '">' + escHtml(r.n) + '</a>'
-          : escHtml(r.n)) + '</td><td>' + escHtml(r.v) + '</td></tr>'
+        pkgRowRenderer(REPO_BASES[i])
       );
       const cmp = makePaged(
-        ALL_CMP_DATA[i],
+        statusObjects(ALL_CMP_DATA[i]),
         'r' + i + '-cmp-tbody', 'r' + i + '-cmp-pages', 'r' + i + '-cmp-pages-bottom', 'r' + i + '-cmp-count',
         renderCmpRow
       );
-      const diff = makePaged(
-        ALL_DIFF_DATA[i],
-        'r' + i + '-diff-tbody', 'r' + i + '-diff-pages', 'r' + i + '-diff-pages-bottom', 'r' + i + '-diff-count',
-        renderCmpRow
-      );
+      const diff = makeDiffTable(i, statusObjects(ALL_DIFF_DATA[i]));
       TABLES.push({{ pkg, cmp, diff }});
     }});
 
     UPSTREAM_TABLE = makePaged(
-      UPSTREAM_PKG_DATA,
+      pkgObjects(UPSTREAM_PKG_DATA),
       'upstream-pkg-tbody', 'upstream-pkg-pages', 'upstream-pkg-pages-bottom', 'upstream-pkg-count',
-      r => '<tr><td>' + (r.u
-        ? '<a href="' + escHtml(r.u.substring(0, r.u.lastIndexOf('/') + 1)) + '">' + escHtml(r.n) + '</a>'
-        : escHtml(r.n)) + '</td><td>' + escHtml(r.v) + '</td></tr>'
+      pkgRowRenderer(UPSTREAM_BASE)
     );
 
     function switchRepoTab(idx, btn) {{
@@ -961,9 +1222,14 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
 
     os.makedirs(html_dir, exist_ok=True)
     out_path = os.path.join(html_dir, "index.html")
-    with open(out_path, "w") as f:
-        f.write(page)
-    print(f"HTML report written to {out_path}", file=sys.stderr)
+    page_bytes = page.encode("utf-8")
+    with open(out_path, "wb") as f:
+        f.write(page_bytes)
+    # A pre-compressed copy for nginx's gzip_static: about a tenth of the size,
+    # with no compression work per request.
+    with open(out_path + ".gz", "wb") as f:
+        f.write(gzip.compress(page_bytes, compresslevel=9))
+    print(f"HTML report written to {out_path} (+ .gz)", file=sys.stderr)
 
 
 # ── entry point ───────────────────────────────────────────────────────────────
