@@ -760,6 +760,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       border-color: #ddd; border-bottom-color: #fff; background: #fff;
       color: #222; font-weight: bold;
     }}
+    .copy-bar {{ margin-top: 1.5rem; display: flex; align-items: center; gap: 0.8rem; }}
     .repo-panel {{ display: none; }}
     .repo-panel.active {{ display: block; }}
     .sub-panel {{ display: none; margin-top: 1rem; }}
@@ -1143,6 +1144,10 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
 
       return {{
         search: table.search,
+        names() {{
+          const items = table.items();
+          return (mode === 'none' ? items : items.flatMap(g => g.items)).map(r => r.n);
+        }},
         groupBy(m) {{
           mode = m;
           expanded.clear();
@@ -1209,6 +1214,47 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       pkgRowRenderer(UPSTREAM_BASE)
     );
 
+    // The packages the visible tab currently lists (search included), as
+    // `apt full-upgrade` arguments. Packages missing from the repo cannot be upgraded.
+    function visiblePackages() {{
+      const panel = document.querySelector('.repo-panel.active');
+      const sub = panel.querySelector('.sub-panel.active');
+      const owner = panel.id === 'repo-upstream' ? UPSTREAM_TABLE : TABLES[Number(panel.id.slice(5))];
+      const kind = sub.id.replace(/^r\\d+-/, '');
+      const table = owner === UPSTREAM_TABLE ? owner
+        : owner[{{ 'pkg-list': 'pkg', 'upstream-cmp': 'cmp', 'upstream-diff': 'diff', 'peer-diff': 'peer' }}[kind]];
+      if (table.names) return table.names();
+      return table.items().filter(r => r.s !== 'not_in_repo').map(r => r.n);
+    }}
+
+    function copyText(text) {{
+      if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
+      // Plain-http pages have no async clipboard.
+      return new Promise((resolve, reject) => {{
+        const ta = document.createElement('textarea');
+        ta.value = text;
+        ta.style.position = 'fixed';
+        ta.style.opacity = '0';
+        document.body.appendChild(ta);
+        ta.select();
+        const ok = document.execCommand('copy');
+        ta.remove();
+        ok ? resolve() : reject(new Error('copy failed'));
+      }});
+    }}
+
+    let copyTimer;
+    function copyUpgradeCommand(btn) {{
+      const names = [...new Set(visiblePackages())];
+      const cmd = 'sudo apt update && sudo apt full-upgrade ' + names.join(' ');
+      copyText(cmd).then(() => names.length + ' package(s) copied', () => 'Copy failed').then(msg => {{
+        const status = document.getElementById('copy-status');
+        status.textContent = msg;
+        clearTimeout(copyTimer);
+        copyTimer = setTimeout(() => {{ status.textContent = ''; }}, 3000);
+      }});
+    }}
+
     function switchRepoTab(idx, btn) {{
       document.querySelectorAll('.repo-panel').forEach(p => p.classList.remove('active'));
       document.querySelectorAll('.repo-tab-btn').forEach(b => b.classList.remove('active'));
@@ -1273,6 +1319,10 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       NAV.querySelector('.nav-burger').setAttribute('aria-expanded', 'false');
     }});
   </script>
+  <div class="copy-bar">
+    <button class="pg-btn" type="button" onclick="copyUpgradeCommand(this)">Copy upgrade command</button>
+    <span class="row-count" id="copy-status" role="status"></span>
+  </div>
   <footer>
     Source code: <a href="https://github.com/blankon/untung">https://github.com/blankon/untung</a>
   </footer>
