@@ -760,6 +760,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       border-color: #ddd; border-bottom-color: #fff; background: #fff;
       color: #222; font-weight: bold;
     }}
+    .copy-bar[hidden] {{ display: none; }}
     .copy-bar {{ margin-top: 1.5rem; display: flex; align-items: center; gap: 0.8rem; }}
     .repo-panel {{ display: none; }}
     .repo-panel.active {{ display: block; }}
@@ -1255,11 +1256,19 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       }});
     }}
 
+    // The button belongs to the tabs that compare one repo against the other.
+    function updateCopyBar() {{
+      const sub = document.querySelector('.repo-panel.active .sub-panel.active');
+      document.getElementById('copy-bar').hidden = !(sub && sub.id.endsWith('-peer-diff'));
+      document.getElementById('copy-status').textContent = '';
+    }}
+
     function switchRepoTab(idx, btn) {{
       document.querySelectorAll('.repo-panel').forEach(p => p.classList.remove('active'));
       document.querySelectorAll('.repo-tab-btn').forEach(b => b.classList.remove('active'));
       document.getElementById('repo-' + idx).classList.add('active');
       btn.classList.add('active');
+      updateCopyBar();
     }}
 
     function switchSubTab(panelId, btn, repoIdx) {{
@@ -1268,6 +1277,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       repoPanel.querySelectorAll('.sub-tab-btn').forEach(b => b.classList.remove('active'));
       document.getElementById(panelId).classList.add('active');
       btn.classList.add('active');
+      updateCopyBar();
     }}
 
     // ── top bar ──
@@ -1319,7 +1329,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       NAV.querySelector('.nav-burger').setAttribute('aria-expanded', 'false');
     }});
   </script>
-  <div class="copy-bar">
+  <div class="copy-bar" id="copy-bar" hidden>
     <button class="pg-btn" type="button" onclick="copyUpgradeCommand(this)">Copy upgrade command</button>
     <span class="row-count" id="copy-status" role="status"></span>
   </div>
