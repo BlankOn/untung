@@ -8,6 +8,13 @@ https://packages.blankonlinux.id/
 python3 untung.py --repo=http://arsip.blankonlinux.id/sinambung/ --repo=http://arsip-dev.blankonlinux.id/sinambung/ --upstream-repo=https://kartolo.sby.datautama.net.id/debian/ --html=./ && open ./index.html
 ```
 
+List the repos downstream first. Each `--repo` is treated as the upstream of
+the one before it, so every repo but the last also gets a "Diff against
+<next repo>" tab; the last one is compared only against `--upstream-repo`.
+For example, with arsip, arsip-dev and arsip-upstream (in that order) and sid
+as `--upstream-repo`, arsip is diffed against arsip-dev, arsip-dev against
+arsip-upstream, and all three against sid.
+
 A repo may name its suite after an `@`. Without one, every dist advertised
 under `{repo}/dists/` is indexed and merged; the upstream dist defaults to
 `sid`. `--upstream-dist=<dist>` is accepted as an alternative to `@<dist>` on

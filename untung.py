@@ -1361,6 +1361,10 @@ USAGE = """Usage:
 A repo may name its suite after an '@', e.g.
   --repo=http://arsip.blankonlinux.id/@verbeek
 Without one, every dist under {repo}/dists/ is indexed and merged.
+
+List the repos downstream first: each --repo is treated as the upstream of
+the one before it, so every repo but the last is also diffed against the next.
+
 The upstream dist defaults to '%s'.""" % UPSTREAM_DEFAULT_DIST
 
 
@@ -1439,14 +1443,14 @@ def main():
             "diff": diff,
         })
 
-    # The first two repos are also compared against each other.
-    if len(repo_data_list) > 1:
-        for one, other in ((0, 1), (1, 0)):
-            this, peer = repo_data_list[one], repo_data_list[other]
-            this["peer_name"] = _short_name(peer["url"])
-            this["peer_diff"] = compare_repo_diff(this["index"], peer["index"])
-            print(f"{len(this['peer_diff'])} of {len(this['index'])} package(s) in {this['url']} "
-                  f"differ from {this['peer_name']}.", file=sys.stderr)
+    # The repos form a chain, each one the upstream of the repo before it, so
+    # every repo but the last is also compared against the next one. The last
+    # is already compared against --upstream-repo.
+    for this, peer in zip(repo_data_list, repo_data_list[1:]):
+        this["peer_name"] = _short_name(peer["url"])
+        this["peer_diff"] = compare_repo_diff(this["index"], peer["index"])
+        print(f"{len(this['peer_diff'])} of {len(this['index'])} package(s) in {this['url']} "
+              f"differ from {this['peer_name']}.", file=sys.stderr)
 
     if html_dir:
         write_html_report(repo_data_list, html_dir, upstream_repo, upstream_index,
