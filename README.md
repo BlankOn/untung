@@ -9,11 +9,16 @@ python3 untung.py --repo=http://arsip.blankonlinux.id/sinambung/ --repo=http://a
 ```
 
 List the repos downstream first. Each `--repo` is treated as the upstream of
-the one before it, so every repo but the last also gets a "Diff against
-<next repo>" tab; the last one is compared only against `--upstream-repo`.
-For example, with arsip, arsip-dev and arsip-upstream (in that order) and sid
-as `--upstream-repo`, arsip is diffed against arsip-dev, arsip-dev against
-arsip-upstream, and all three against sid.
+the one before it, so every repo also gets a "Diff against <repo>" tab for each
+repo listed after it. `--upstream-repo` is shown by its dist name (e.g. "Sid"),
+so it is not confused with a BlankOn repo such as arsip-upstream.
+
+For example, with arsip, arsip-dev and arsip-upstream (in that order) and Sid
+as `--upstream-repo`:
+
+- arsip is diffed against arsip-dev, arsip-upstream and Sid
+- arsip-dev is diffed against arsip-upstream and Sid
+- arsip-upstream is diffed against Sid
 
 A repo may name its suite after an `@`. Without one, every dist advertised
 under `{repo}/dists/` is indexed and merged; the upstream dist defaults to
