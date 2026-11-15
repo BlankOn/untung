@@ -1,11 +1,16 @@
 #!/usr/bin/env python3
+import contextlib
+import fcntl
 import gzip
+import hashlib
+import json
 import os
 import re
 import shutil
 import subprocess
 import sys
 import tempfile
+import time
 from datetime import datetime
 from io import BytesIO
 import urllib.request
@@ -313,11 +318,134 @@ def compare_repo_diff(repo_index, upstream_index):
 
 # ── html report ───────────────────────────────────────────────────────────────
 
+# Each table ships as its own gzip file under data/, named after a hash of
+# its content: unchanged data keeps its name (and the browser's cached copy)
+# across runs, and a page only ever points at the files of its own run.
+DATA_DIR = "data"
+
+
+def encode_rows(rows):
+    """Return (json_bytes, gz_bytes) for a table's rows.
+
+    The gzip header carries no timestamp, so identical rows always give
+    identical bytes.
+    """
+    json_bytes = json.dumps(rows, separators=(",", ":")).encode("utf-8")
+    return json_bytes, gzip.compress(json_bytes, compresslevel=9, mtime=0)
+
+
+def data_file_name(slug, json_bytes):
+    """File name for a table: "<slug>.<first 12 hex of sha256>.json.gz"."""
+    return f"{slug}.{hashlib.sha256(json_bytes).hexdigest()[:12]}.json.gz"
+
+
+def write_file_atomic(path, data):
+    """Write data to path via a world-readable temp file in the same folder,
+    so a reader never sees a half-written file."""
+    fd, tmp = tempfile.mkstemp(dir=os.path.dirname(path) or ".", prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "wb") as f:
+            f.write(data)
+        os.chmod(tmp, 0o644)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
+def write_data_file(html_dir, slug, rows):
+    """Write a table's rows under html_dir/data/ and return the page-relative
+    path ("data/<name>"). A file that already exists has the same content
+    and is left alone, so its Last-Modified/ETag stay the same."""
+    data_dir = os.path.join(html_dir, DATA_DIR)
+    os.makedirs(data_dir, exist_ok=True)
+    os.chmod(data_dir, 0o755)
+    json_bytes, gz_bytes = encode_rows(rows)
+    name = data_file_name(slug, json_bytes)
+    path = os.path.join(data_dir, name)
+    if not os.path.exists(path):
+        write_file_atomic(path, gz_bytes)
+    return f"{DATA_DIR}/{name}"
+
+
+# A data file the report stops using is kept this long (seconds) after it
+# retires, so a page opened before the switch can still load its tabs.
+DATA_MAX_AGE = 3600
+
+
+def manifest_paths(manifest):
+    """Every "data/..." path a page's manifest refers to."""
+    paths = {manifest["upstream"]}
+    for files in manifest["repos"]:
+        paths.update((files["pkg"], files["cmp"], files["diff"], *files["peers"]))
+    return paths
+
+
+def previous_manifest_paths(index_path):
+    """The data paths an existing page refers to; empty when there is no page,
+    or it is the older single-file kind, or it cannot be read."""
+    try:
+        with open(index_path, encoding="utf-8") as f:
+            m = re.search(r"const DATA_FILES = (.*?);\n", f.read(), re.S)
+        return manifest_paths(json.loads(m.group(1))) if m else set()
+    except (OSError, ValueError, KeyError, TypeError):
+        return set()
+
+
+def retire_files(html_dir, previous, current):
+    """Start the retention clock of the files the new page no longer uses."""
+    for rel in previous - current:
+        try:
+            os.utime(os.path.join(html_dir, rel), None)
+        except FileNotFoundError:
+            pass
+
+
+def clean_data_dir(html_dir, keep, max_age=DATA_MAX_AGE, now=None):
+    """Remove files in data/ that are not in keep and were last touched more
+    than max_age seconds ago; return their "data/..." paths, sorted."""
+    now = time.time() if now is None else now
+    data_dir = os.path.join(html_dir, DATA_DIR)
+    removed = []
+    for entry in os.scandir(data_dir):
+        rel = f"{DATA_DIR}/{entry.name}"
+        if entry.name == ".lock" or rel in keep or not entry.is_file(follow_symlinks=False):
+            continue
+        if entry.stat(follow_symlinks=False).st_mtime < now - max_age:
+            os.unlink(entry.path)
+            removed.append(rel)
+    return sorted(removed)
+
+
+@contextlib.contextmanager
+def report_lock(html_dir):
+    """Hold an exclusive lock on html_dir/data/.lock, so overlapping runs
+    write and clean up one after another."""
+    data_dir = os.path.join(html_dir, DATA_DIR)
+    os.makedirs(data_dir, exist_ok=True)
+    os.chmod(data_dir, 0o755)
+    with open(os.path.join(data_dir, ".lock"), "a") as f:
+        fcntl.flock(f, fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            fcntl.flock(f, fcntl.LOCK_UN)
+
+
 def _repo_label(url, dist=None):
     """Display label for a repo: "hostname / dist" (or just the hostname)."""
     from urllib.parse import urlparse
     host = urlparse(url).hostname or url
     return f"{host} / {dist}" if dist else host
+
+
+def _slug(text):
+    """Filename-safe version of text: runs of characters outside
+    [A-Za-z0-9_-] become one "-", with none at either end."""
+    return re.sub(r"[^A-Za-z0-9_-]+", "-", text).strip("-")
 
 
 def _short_name(url):
@@ -329,8 +457,36 @@ def _short_name(url):
 def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=None,
                       upstream_dist=UPSTREAM_DEFAULT_DIST):
     """
+    Write the report into html_dir and return its data manifest.
+
     repo_data_list: list of {"url": str, "index": dict, "results": list}
     """
+    with report_lock(html_dir):
+        out_path = os.path.join(html_dir, "index.html")
+        previous = previous_manifest_paths(out_path)
+        manifest, page_bytes = _write_data_and_render(
+            repo_data_list, html_dir, upstream_url, upstream_index, upstream_dist)
+        current = manifest_paths(manifest)
+        # Retire before the page is replaced: once it is, the previous
+        # manifest is gone, and a failed run must not lose the hour of grace.
+        retire_files(html_dir, previous, current)
+        # The data files are already in place, so the new page never points
+        # at a file that is not there yet.
+        write_file_atomic(out_path, page_bytes)
+        # A pre-compressed copy for nginx's gzip_static, if it is ever enabled.
+        write_file_atomic(out_path + ".gz", gzip.compress(page_bytes, compresslevel=9))
+        print(f"HTML report written to {out_path} (+ .gz, {DATA_DIR}/)", file=sys.stderr)
+        removed = clean_data_dir(html_dir, current)
+        if removed:
+            print(f"  Removed {len(removed)} old data file(s).", file=sys.stderr)
+    return manifest
+
+
+def _write_data_and_render(repo_data_list, html_dir, upstream_url, upstream_index,
+                           upstream_dist):
+    """Write the data files and render the page that points at them; return
+    (manifest, page bytes). Call through write_html_report(), which holds
+    the lock, publishes the page and cleans up."""
     import html as _html
     import json as _json
 
@@ -410,14 +566,22 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
             packed.append(row)
         return packed
 
-    # Build per-repo JS data blobs
+    # Each table's rows go to their own data file, written before the page
+    # that points at them; the page fetches a table when its tab opens.
+    manifest = {"repos": [], "upstream": None}
     repos_js_entries = []
-    for rd in repo_data_list:
+    for i, rd in enumerate(repo_data_list):
         base = base_of(rd["url"])
-        pkg_data = dumps(pkg_rows(rd["index"], base))
-        cmp_data = dumps(status_rows(make_cmp_rows(rd["results"])))
+        slug = f"r{i}-{_slug(_short_name(rd['url']))}"
         diff_rows = make_diff_rows(rd.get("diff", []))
-        diff_data = dumps(status_rows(diff_rows))
+        files = {
+            "pkg": write_data_file(html_dir, f"{slug}-pkg", pkg_rows(rd["index"], base)),
+            "cmp": write_data_file(html_dir, f"{slug}-cmp",
+                                   status_rows(make_cmp_rows(rd["results"]))),
+            "diff": write_data_file(html_dir, f"{slug}-diff", status_rows(diff_rows)),
+            "peers": [],
+        }
+        manifest["repos"].append(files)
         label = e(_repo_label(rd["url"], rd.get("dist")))
         url = e(rd["url"])
         count_behind = sum(1 for r in rd["results"] if r["status"] == "behind")
@@ -444,9 +608,11 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
             diff_summary_color = "#27ae60"
 
         peers = []
-        for peer_info in rd.get("peers", []):
+        for j, peer_info in enumerate(rd.get("peers", [])):
             peer_name = peer_info["name"]
             peer_rows = make_diff_rows(peer_info["diff"])
+            files["peers"].append(
+                write_data_file(html_dir, f"{slug}-peer{j}", status_rows(peer_rows)))
             peer_counts = {
                 k: sum(1 for r in peer_rows if r["s"] == k)
                 for k in ("behind", "ahead", "not_in_upstream")
@@ -466,7 +632,6 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
                 "raw_name": peer_name,
                 "summary": e(peer_summary),
                 "summary_color": peer_color,
-                "data": status_rows(peer_rows),
             })
 
         repos_js_entries.append({
@@ -474,18 +639,15 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
             "label": label,
             "url": url,
             "base": base,
-            "pkg_data": pkg_data,
-            "cmp_data": cmp_data,
-            "diff_data": diff_data,
             "summary": e(summary),
             "summary_color": summary_color,
             "diff_summary": e(diff_summary),
             "diff_summary_color": diff_summary_color,
         })
 
-    # Build upstream JS data
     upstream_base = base_of(upstream_url)
-    upstream_pkg_data = dumps(pkg_rows(upstream_index or {}, upstream_base))
+    manifest["upstream"] = write_data_file(
+        html_dir, "upstream-pkg", pkg_rows(upstream_index or {}, upstream_base))
 
     # Generate repo meta line
     repo_links = " &nbsp;|&nbsp; ".join(
@@ -635,11 +797,6 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         '<path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></svg>'
     )
 
-    # Generate JS data arrays
-    all_pkg_data = "[" + ",\n".join(r["pkg_data"] for r in repos_js_entries) + "]"
-    all_cmp_data = "[" + ",\n".join(r["cmp_data"] for r in repos_js_entries) + "]"
-    all_diff_data = "[" + ",\n".join(r["diff_data"] for r in repos_js_entries) + "]"
-    all_peer_data = "[" + ",\n".join(dumps([p["data"] for p in r["peers"]]) for r in repos_js_entries) + "]"
     peer_names = dumps([[p["raw_name"] for p in r["peers"]] for r in repos_js_entries])
     repo_bases = dumps([r["base"] for r in repos_js_entries])
 
@@ -896,11 +1053,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
   <script>
     const REPO_BASES = {repo_bases};
     const UPSTREAM_BASE = {dumps(upstream_base)};
-    const ALL_PKG_DATA = {all_pkg_data};
-    const ALL_CMP_DATA = {all_cmp_data};
-    const ALL_DIFF_DATA = {all_diff_data};
-    const ALL_PEER_DATA = {all_peer_data};
-    const UPSTREAM_PKG_DATA = {upstream_pkg_data};
+    const DATA_FILES = {dumps(manifest)};
     const PEER_NAMES = {peer_names};
     const UPSTREAM_NAME = {dumps(upstream_name)};
     const PAGE_SIZE = 100;
@@ -919,7 +1072,8 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
     // search and the "N packages" counter, for tables whose items are groups.
     function makePaged(allData, tbodyId, topPagesId, botPagesId, countId, renderRow, opts = {{}}) {{
       const filterItems = opts.filter || ((data, lq) => data.filter(r => rowMatches(r, lq)));
-      let query = '';
+      // opts.query: search text typed before the table's data arrived.
+      let query = opts.query || '';
       let filtered = allData;
       let currentPage = 1;
       let searchTimer;
@@ -1001,6 +1155,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         next() {{ obj.goto(currentPage + 1); }},
       }};
 
+      applyFilter();
       render();
       return obj;
     }}
@@ -1062,7 +1217,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         : '<span class="mixed">mixed (' + distinct + ')</span>';
     }}
 
-    function makeDiffTable(i, rows, key, labels = STATUS_LABEL) {{
+    function makeDiffTable(i, rows, key, labels = STATUS_LABEL, query = '') {{
       const tbodyId = 'r' + i + '-' + key + '-tbody';
       const cmpRowL = (r, c, b, a) => cmpRow(r, c, b, a, labels);
       const groupsByMode = {{}};
@@ -1124,6 +1279,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         {{
           filter: (data, lq) => mode === 'none' ? data.filter(r => rowMatches(r, lq)) : filterGroups(data, lq),
           count: (shown, all) => mode === 'none' ? null : countGroups(shown, all),
+          query,
         }}
       );
 
@@ -1193,48 +1349,106 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
         '</a></td><td>' + escHtml(r.v) + '</td></tr>';
     }}
 
-    ALL_PKG_DATA.forEach((pkgRows, i) => {{
-      const pkg = makePaged(
-        pkgObjects(pkgRows),
-        'r' + i + '-pkg-tbody', 'r' + i + '-pkg-pages', 'r' + i + '-pkg-pages-bottom', 'r' + i + '-pkg-count',
-        pkgRowRenderer(REPO_BASES[i])
+    // ── lazy tables ──
+    // Each table's rows live in their own gzip file (DATA_FILES). A table is
+    // fetched, unpacked and built the first time its tab is shown; until then
+    // it remembers what the viewer typed or picked and applies it on arrival.
+    const LOAD_ERROR = "Couldn't load this table. Reload the page to try again.";
+
+    async function loadRows(path) {{
+      const res = await fetch(path);
+      if (!res.ok) throw new Error(path + ': HTTP ' + res.status);
+      const buf = new Uint8Array(await res.arrayBuffer());
+      // The server sends the .gz as is; unpack it here. Bytes without the gzip
+      // magic were already unpacked on the way (a server that adds
+      // Content-Encoding), so they are plain JSON.
+      const text = buf[0] === 0x1f && buf[1] === 0x8b
+        ? await new Response(new Blob([buf]).stream().pipeThrough(new DecompressionStream('gzip'))).text()
+        : new TextDecoder().decode(buf);
+      return JSON.parse(text);
+    }}
+
+    // build(rows, query, mode) returns the real table, already filtered by
+    // query and, for diff tables, grouped by mode.
+    function lazyTable(path, tbodyId, build) {{
+      let real = null, pending = null, query = '', mode = null;
+      const t = {{
+        ready: false,
+        load() {{
+          if (!pending) pending = loadRows(path).then(rows => {{
+            real = build(rows, query, mode);
+            t.ready = true;
+          }}).catch(err => {{
+            pending = null;   // opening the tab again retries
+            const tbody = document.getElementById(tbodyId);
+            const cols = tbody.closest('table').querySelectorAll('thead th').length;
+            tbody.innerHTML = '<tr><td colspan="' + cols + '" style="color:#c0392b">' + LOAD_ERROR + '</td></tr>';
+            console.error(err);
+          }});
+          return pending;
+        }},
+        search(q) {{ query = q; if (real) real.search(q); }},
+        groupBy(m) {{ mode = m; if (real && real.groupBy) real.groupBy(m); }},
+        expandPage() {{ if (real && real.expandPage) real.expandPage(); }},
+        collapseAll() {{ if (real && real.collapseAll) real.collapseAll(); }},
+        // The packages the table currently lists (search included), as
+        // `apt full-upgrade` arguments. Packages missing from the repo cannot be upgraded.
+        packageNames() {{
+          if (!real) return [];
+          return real.names ? real.names()
+            : real.items().filter(r => r.s !== 'not_in_repo').map(r => r.n);
+        }},
+      }};
+      return t;
+    }}
+
+    function pagedBuilder(prefix, toObjects, renderRow) {{
+      return (rows, query) => makePaged(
+        toObjects(rows),
+        prefix + '-tbody', prefix + '-pages', prefix + '-pages-bottom', prefix + '-count',
+        renderRow, {{ query }}
       );
-      const cmp = makePaged(
-        statusObjects(ALL_CMP_DATA[i]),
-        'r' + i + '-cmp-tbody', 'r' + i + '-cmp-pages', 'r' + i + '-cmp-pages-bottom', 'r' + i + '-cmp-count',
-        renderCmpRow
-      );
-      const diff = makeDiffTable(i, statusObjects(ALL_DIFF_DATA[i]), 'diff');
-      diff.groupBy('source');
-      const tables = {{ pkg, cmp, diff }};
-      ALL_PEER_DATA[i].forEach((peerRows, j) => {{
+    }}
+
+    function diffBuilder(i, key, labels) {{
+      return (rows, query, mode) => {{
+        const table = makeDiffTable(i, statusObjects(rows), key, labels, query);
+        table.groupBy(mode || 'source');
+        return table;
+      }};
+    }}
+
+    DATA_FILES.repos.forEach((files, i) => {{
+      const id = k => 'r' + i + '-' + k;
+      const tables = {{
+        pkg: lazyTable(files.pkg, id('pkg-tbody'),
+          pagedBuilder(id('pkg'), pkgObjects, pkgRowRenderer(REPO_BASES[i]))),
+        cmp: lazyTable(files.cmp, id('cmp-tbody'),
+          pagedBuilder(id('cmp'), statusObjects, renderCmpRow)),
+        diff: lazyTable(files.diff, id('diff-tbody'), diffBuilder(i, 'diff')),
+      }};
+      files.peers.forEach((path, j) => {{
         const key = 'peer' + j;
-        tables[key] = makeDiffTable(i, statusObjects(peerRows), key,
-          {{ ...STATUS_LABEL, not_in_upstream: 'Not in ' + PEER_NAMES[i][j] }});
-        tables[key].groupBy('source');
+        tables[key] = lazyTable(path, id(key + '-tbody'), diffBuilder(i, key,
+          {{ ...STATUS_LABEL, not_in_upstream: 'Not in ' + PEER_NAMES[i][j] }}));
       }});
       TABLES.push(tables);
     }});
 
-    UPSTREAM_TABLE = makePaged(
-      pkgObjects(UPSTREAM_PKG_DATA),
-      'upstream-pkg-tbody', 'upstream-pkg-pages', 'upstream-pkg-pages-bottom', 'upstream-pkg-count',
-      pkgRowRenderer(UPSTREAM_BASE)
-    );
+    UPSTREAM_TABLE = lazyTable(DATA_FILES.upstream, 'upstream-pkg-tbody',
+      pagedBuilder('upstream-pkg', pkgObjects, pkgRowRenderer(UPSTREAM_BASE)));
 
-    // The packages the visible tab currently lists (search included), as
-    // `apt full-upgrade` arguments. Packages missing from the repo cannot be upgraded.
-    function visiblePackages() {{
+    // The table of the visible tab.
+    function activeTable() {{
       const panel = document.querySelector('.repo-panel.active');
-      const sub = panel.querySelector('.sub-panel.active');
-      const owner = panel.id === 'repo-upstream' ? UPSTREAM_TABLE : TABLES[Number(panel.id.slice(5))];
-      const kind = sub.id.replace(/^r\\d+-/, '');
-      const table = owner === UPSTREAM_TABLE ? owner
-        : /^peer\\d+-diff$/.test(kind) ? owner[kind.slice(0, -5)]
+      if (panel.id === 'repo-upstream') return UPSTREAM_TABLE;
+      const owner = TABLES[Number(panel.id.slice(5))];
+      const kind = panel.querySelector('.sub-panel.active').id.replace(/^r\\d+-/, '');
+      return /^peer\\d+-diff$/.test(kind) ? owner[kind.slice(0, -5)]
         : owner[{{ 'pkg-list': 'pkg', 'upstream-cmp': 'cmp', 'upstream-diff': 'diff' }}[kind]];
-      if (table.names) return table.names();
-      return table.items().filter(r => r.s !== 'not_in_repo').map(r => r.n);
     }}
+
+    activeTable().load();
 
     function copyText(text) {{
       if (navigator.clipboard && window.isSecureContext) return navigator.clipboard.writeText(text);
@@ -1253,15 +1467,19 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
     }}
 
     let copyTimer;
+    function showCopyStatus(msg) {{
+      const status = document.getElementById('copy-status');
+      status.textContent = msg;
+      clearTimeout(copyTimer);
+      copyTimer = setTimeout(() => {{ status.textContent = ''; }}, 3000);
+    }}
+
     function copyUpgradeCommand(btn) {{
-      const names = [...new Set(visiblePackages())];
+      const table = activeTable();
+      if (!table.ready) {{ showCopyStatus('Still loading…'); return; }}
+      const names = [...new Set(table.packageNames())];
       const cmd = 'sudo apt update && sudo apt full-upgrade ' + names.join(' ');
-      copyText(cmd).then(() => names.length + ' package(s) copied', () => 'Copy failed').then(msg => {{
-        const status = document.getElementById('copy-status');
-        status.textContent = msg;
-        clearTimeout(copyTimer);
-        copyTimer = setTimeout(() => {{ status.textContent = ''; }}, 3000);
-      }});
+      copyText(cmd).then(() => names.length + ' package(s) copied', () => 'Copy failed').then(showCopyStatus);
     }}
 
     // The button belongs to the tabs that compare one repo against the other.
@@ -1277,6 +1495,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       document.getElementById('repo-' + idx).classList.add('active');
       btn.classList.add('active');
       updateCopyBar();
+      activeTable().load();
     }}
 
     function switchSubTab(panelId, btn, repoIdx) {{
@@ -1286,6 +1505,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
       document.getElementById(panelId).classList.add('active');
       btn.classList.add('active');
       updateCopyBar();
+      activeTable().load();
     }}
 
     // ── top bar ──
@@ -1349,16 +1569,7 @@ def write_html_report(repo_data_list, html_dir, upstream_url, upstream_index=Non
 </html>
 """
 
-    os.makedirs(html_dir, exist_ok=True)
-    out_path = os.path.join(html_dir, "index.html")
-    page_bytes = page.encode("utf-8")
-    with open(out_path, "wb") as f:
-        f.write(page_bytes)
-    # A pre-compressed copy for nginx's gzip_static: about a tenth of the size,
-    # with no compression work per request.
-    with open(out_path + ".gz", "wb") as f:
-        f.write(gzip.compress(page_bytes, compresslevel=9))
-    print(f"HTML report written to {out_path} (+ .gz)", file=sys.stderr)
+    return manifest, page.encode("utf-8")
 
 
 # ── entry point ───────────────────────────────────────────────────────────────

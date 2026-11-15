@@ -5,8 +5,10 @@ https://packages.blankonlinux.id/
 ## Usage
 
 ```
-python3 untung.py --repo=http://arsip.blankonlinux.id/sinambung/ --repo=http://arsip-dev.blankonlinux.id/sinambung/ --upstream-repo=https://kartolo.sby.datautama.net.id/debian/ --html=./ && open ./index.html
+python3 untung.py --repo=http://arsip.blankonlinux.id/sinambung/ --repo=http://arsip-dev.blankonlinux.id/sinambung/ --upstream-repo=https://kartolo.sby.datautama.net.id/debian/ --html=./ && python3 -m http.server -d ./
 ```
+
+then open http://localhost:8000/.
 
 List the repos downstream first. Each `--repo` is treated as the upstream of
 the one before it, so every repo also gets a "Diff against <repo>" tab for each
@@ -27,19 +29,34 @@ under `{repo}/dists/` is indexed and merged; the upstream dist defaults to
 
 ## Serving the report
 
-`--html=<dir>` writes `index.html` and a gzip-compressed copy,
-`index.html.gz`, about a sixth of its size. With nginx, let browsers download
-the compressed copy by turning on `gzip_static` (module
-`ngx_http_gzip_static_module`, included in Debian's nginx packages) where the
-report is served:
+`--html=<dir>` writes:
+
+- `index.html`: the page itself, without any table data, so it opens at once;
+- `data/`: one gzip-compressed JSON file per table, named after a hash of its
+  content (`r0-arsip-pkg.3f9c1a2b7d4e.json.gz`). The page fetches a table's
+  file the first time its tab is opened and unpacks it in the browser, so no
+  server-side compression is needed. Unchanged tables keep their file name
+  between runs, so browsers reuse the copy they already have;
+- `index.html.gz`: a compressed copy of the page.
+
+Publish the whole folder, `data/` included. Each run writes the data files
+first and the page last, and keeps the files of the page it replaces for at
+least an hour, so a page that is already open can still load its tabs. Runs
+that overlap wait for each other.
+
+Browsers cannot fetch the data files of a page opened straight from disk
+(`file://`), so preview the report through a web server, such as
+`python3 -m http.server -d <dir>`.
+
+With nginx, `gzip_static` (module `ngx_http_gzip_static_module`, included in
+Debian's nginx packages) lets browsers download the compressed `index.html.gz`
+instead of `index.html`. It is optional: the table data is already compressed.
 
 ```
 location / {
     gzip_static on;
 }
 ```
-
-Without it, nginx keeps serving the uncompressed `index.html`.
 
 ## Tests
 
